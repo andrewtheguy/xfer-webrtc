@@ -2,11 +2,12 @@
 
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures::StreamExt;
 use iroh::{
-    Endpoint, EndpointAddr, RelayMap, RelayUrl, TransportAddr, Watcher,
-    address_lookup::mdns::MdnsAddressLookup,
-    endpoint::{Builder as EndpointBuilder, Connection, PathInfoList, RecvStream, RelayMode, SendStream},
+    Endpoint, EndpointAddr, RelayMap, RelayUrl, TransportAddr,
+    endpoint::{Connection, PathList, RecvStream, RelayMode, SendStream, presets},
 };
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use tokio::task::JoinHandle;
 use std::io;
 use std::pin::Pin;
@@ -124,7 +125,7 @@ impl AsyncWrite for OwnedIrohDuplex {
 }
 
 /// Format connection path info for display.
-fn format_paths(paths: &PathInfoList) -> String {
+fn format_paths(paths: &PathList<'_>) -> String {
     if paths.is_empty() {
         return "establishing...".to_string();
     }
@@ -132,14 +133,11 @@ fn format_paths(paths: &PathInfoList) -> String {
         .iter()
         .filter(|p| p.is_selected())
         .map(|path| {
-            let rtt_str = match path.rtt() {
-                Some(rtt) => format!(" (rtt {rtt:.0?})"),
-                None => String::new(),
-            };
+            let rtt = path.rtt();
             match path.remote_addr() {
-                TransportAddr::Ip(addr) => format!("Direct {addr}{rtt_str}"),
-                TransportAddr::Relay(url) => format!("Relay {url}{rtt_str}"),
-                other => format!("{other:?}{rtt_str}"),
+                TransportAddr::Ip(addr) => format!("Direct {addr} (rtt {rtt:.0?})"),
+                TransportAddr::Relay(url) => format!("Relay {url} (rtt {rtt:.0?})"),
+                other => format!("{other:?} (rtt {rtt:.0?})"),
             }
         })
         .collect();
@@ -164,19 +162,18 @@ impl Drop for PathWatcherGuard {
 ///
 /// The returned guard aborts the background task when dropped.
 pub fn watch_connection_paths(conn: &Connection) -> PathWatcherGuard {
-    let mut watcher = conn.paths();
-
-    // Print initial snapshot
-    let initial = watcher.get();
-    eprintln!("   Connection: {}", format_paths(&initial));
-
-    // Spawn background task that prints on changes
-    let mut last = initial;
+    let conn = conn.clone();
     PathWatcherGuard(tokio::spawn(async move {
-        while let Ok(paths) = watcher.updated().await {
-            if paths != last {
-                eprintln!("   Connection: {}", format_paths(&paths));
-                last = paths;
+        // The stream yields the current snapshot on the first poll, then a
+        // fresh snapshot whenever the open or selected paths change; it ends
+        // when the connection closes.
+        let mut stream = conn.paths_stream();
+        let mut last: Option<String> = None;
+        while let Some(paths) = stream.next().await {
+            let formatted = format_paths(&paths);
+            if last.as_deref() != Some(formatted.as_str()) {
+                eprintln!("   Connection: {}", formatted);
+                last = Some(formatted);
             }
         }
     }))
@@ -227,12 +224,12 @@ pub async fn create_sender_endpoint(relay_urls: Vec<String>) -> Result<Endpoint>
     print_relay_info(&relay_urls);
     let relay_mode = parse_relay_mode(relay_urls)?;
 
-    // iroh 0.98 (PR #3992) requires the crypto provider to be set explicitly
-    // on the builder when starting from `EndpointBuilder::empty()` — the
-    // `tls-ring` feature only makes the ring backend available, it does not
-    // wire it in, and rustls' global `install_default()` is not consulted.
+    // iroh 1.0 requires the crypto provider to be set explicitly on the
+    // builder when starting from the `Empty` preset — the `tls-ring` feature
+    // only makes the ring backend available, it does not wire it in, and
+    // rustls' global `install_default()` is not consulted.
     let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
-    let endpoint = EndpointBuilder::empty()
+    let endpoint = Endpoint::builder(presets::Empty)
         .crypto_provider(crypto_provider)
         .relay_mode(relay_mode)
         .alpns(vec![ALPN.to_vec()])
@@ -256,12 +253,12 @@ pub async fn create_receiver_endpoint(relay_urls: Vec<String>) -> Result<Endpoin
     print_relay_info(&relay_urls);
     let relay_mode = parse_relay_mode(relay_urls)?;
 
-    // iroh 0.98 (PR #3992) requires the crypto provider to be set explicitly
-    // on the builder when starting from `EndpointBuilder::empty()` — the
-    // `tls-ring` feature only makes the ring backend available, it does not
-    // wire it in, and rustls' global `install_default()` is not consulted.
+    // iroh 1.0 requires the crypto provider to be set explicitly on the
+    // builder when starting from the `Empty` preset — the `tls-ring` feature
+    // only makes the ring backend available, it does not wire it in, and
+    // rustls' global `install_default()` is not consulted.
     let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
-    let endpoint = EndpointBuilder::empty()
+    let endpoint = Endpoint::builder(presets::Empty)
         .crypto_provider(crypto_provider)
         .relay_mode(relay_mode)
         .address_lookup(MdnsAddressLookup::builder())
