@@ -149,6 +149,57 @@ sequenceDiagram
     Receiver->>Sender: ACK
 ```
 
+#### WebRTC Manual Mode
+
+Manual WebRTC mode uses the same WebRTC DataChannel transport and encrypted
+transfer protocol as Nostr-signaled WebRTC mode, but replaces relay signaling
+with two user-copied payloads. The offer contains the SDP offer, sender ICE
+candidates, transfer metadata, creation timestamp, and AES key. The answer
+contains the SDP answer and receiver ICE candidates.
+
+```mermaid
+sequenceDiagram
+    participant Sender
+    participant User as User Copy/Paste Channel
+    participant Receiver
+
+    Sender->>Sender: 1. Create RTCPeerConnection + data channel
+    Sender->>Sender: 2. Create SDP offer
+    Sender->>Sender: 3. Gather sender ICE candidates
+    Sender->>Sender: 4. Generate manual offer payload
+    Note over Sender: Offer = SDP offer + ICE candidates + transfer info + created_at + AES key
+
+    Sender->>User: 5. Display offer code
+    User->>Receiver: 6. Paste offer code into receive-manual
+
+    Receiver->>Receiver: 7. Validate offer TTL and checksum
+    Receiver->>Receiver: 8. Create RTCPeerConnection
+    Receiver->>Receiver: 9. Set remote offer and add sender ICE candidates
+    Receiver->>Receiver: 10. Create SDP answer and gather receiver ICE candidates
+
+    Receiver->>User: 11. Display answer code
+    User->>Sender: 12. Paste answer code into send-manual
+
+    Sender->>Sender: 13. Set remote answer and add receiver ICE candidates
+
+    Note over Sender,Receiver: ICE connectivity checks, WebRTC connection established
+    Note over Sender,Receiver: The manual offer carries the AES-256-GCM key
+
+    Sender->>Receiver: 14. Send Encrypted Header (AES-256-GCM)
+    alt User accepts transfer
+        Receiver->>Sender: 15. Send Encrypted PROCEED
+    else User declines or file conflict
+        Receiver->>Sender: 15. Send Encrypted ABORT
+        Note over Sender,Receiver: Transfer cancelled
+    end
+
+    loop 16KB chunks
+        Sender->>Receiver: Send Encrypted Chunk
+    end
+
+    Receiver->>Sender: 16. Send Encrypted ACK
+```
+
 ### 2. Local Transfers (LAN)
 
 #### Local-only Mode (iroh with relays disabled)
