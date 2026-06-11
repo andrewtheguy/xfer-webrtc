@@ -2,8 +2,6 @@
 resolver = "2"
 members = [
     "crates/beam-common",
-    "crates/beam-rs",
-    "crates/beam-rs-tor",
     "crates/beam-rs-webrtc",
 ]
 

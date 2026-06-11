@@ -1,19 +1,19 @@
-# beam-rs
+# beam-rs-webrtc
 
 > [!NOTE]
 > This project is still work in progress (0.0.x). No backward compatibility is guaranteed between versions.
 
-A secure, cross-platform, single-binary peer-to-peer file transfer tool with direct connectivity and AES-256-GCM end-to-end encryption.
+A secure, cross-platform, single-binary peer-to-peer file transfer tool built on WebRTC data channels with AES-256-GCM end-to-end encryption.
 
 ## Features
 
-- **End-to-end encryption** - All transfers use AES-256-GCM encryption
+- **End-to-end encryption** - All transfers use AES-256-GCM encryption on top of WebRTC's DTLS transport
+- **WebRTC data channels** - Direct peer-to-peer connectivity with STUN-based NAT traversal
+- **Nostr signaling** - Online connection setup via Nostr relays (with relay auto-discovery)
+- **Manual signaling** - Offline copy/paste offer/answer exchange when relays are unavailable
 - **Resumable file transfers** - Interrupted file downloads can resume from where they left off
 - **File and folder transfers** - Send individual files or entire directories (automatically archived)
-- **Multiple transport modes** - iroh (recommended), Tor, and WebRTC
-- **Local-only transfers** - same-network transfers without internet via mDNS discovery (`beam-rs send --local-only`)
-- **NAT traversal** - Automatic relay fallback for iroh; STUN for WebRTC
-- **Anonymous transfers** - Tor hidden services via `beam-rs-tor` for anonymity
+- **PIN-based codes** - Optional short PIN exchange (via Nostr) for sharing a transfer verbally
 - **Cross-platform** - Standalone binary for macOS, Linux, and Windows
 
 ## Installation
@@ -24,12 +24,6 @@ The release installers fetch a native, standalone executable. You only need the 
 
 ```bash
 curl -sSL https://andrewtheguy.github.io/beam-rs/install.sh | bash
-```
-
-To install the WebRTC binary instead:
-
-```bash
-curl -sSL https://andrewtheguy.github.io/beam-rs/install.sh | bash -s -- --webrtc
 ```
 
 By default the installer pulls the latest **stable** release. Use `--prerelease` for the newest prerelease, or pass an explicit tag to pin to a specific build. Examples:
@@ -48,12 +42,6 @@ curl -sSL https://andrewtheguy.github.io/beam-rs/install.sh | bash -s 2025121017
 irm https://andrewtheguy.github.io/beam-rs/install.ps1 | iex
 ```
 
-To install the WebRTC binary instead (single line):
-
-```powershell
-$env:BEAM_INSTALL_ARGS='-WebRTC'; irm https://andrewtheguy.github.io/beam-rs/install.ps1 | iex
-```
-
 By default the PowerShell installer pulls the latest **stable** release. Use `-PreRelease` for the newest prerelease, or pass an explicit tag to pin to a specific build. Examples (args-only parser):
 
 ```powershell
@@ -67,136 +55,67 @@ $env:BEAM_INSTALL_ARGS='20251210172710'; irm https://andrewtheguy.github.io/beam
 ### From Source
 
 ```bash
-# Main binary (iroh transport)
-cargo build --release
-
-# Tor binary (separate crate, anonymous transfers)
-cargo build --release -p beam-rs-tor
-
-# WebRTC binary (separate crate)
 cargo build --release -p beam-rs-webrtc
 ```
 
 ## Usage
 
-### Internet Transfers
+Transfers use a **Beam Code** to establish the connection. The code carries the
+encryption key, so only share it through a channel you trust.
 
-Use these modes for transfers over the internet. They all use a **Beam Code** for connection.
+### Online (Nostr signaling)
 
-#### 1. iroh Mode (Recommended) - `send`
-*Direct P2P transport using QUIC/TLS with automatic relay fallback. Most reliable for both small and large files.*
-
-```bash
-# Send file
-beam-rs send /path/to/file
-
-# Send folder
-beam-rs send /path/to/folder --folder
-```
-
-##### Custom Iroh Relays
-- Default behavior uses iroh's public relay fallback plus direct P2P.
-- For self-hosted setups, point both sides at your own DERP relay(s):
-    ```bash
-    beam-rs send --relay-url https://relay1.example.com /path/to/file
-    beam-rs receive --relay-url https://relay1.example.com
-    ```
-- Multiple `--relay-url` flags are supported for failover.
-
-#### 2. Tor Mode - `beam-rs-tor send`
-*Anonymous transfers via Tor hidden services. Use when anonymity is required.*
-> Built as a separate binary: `cargo build -p beam-rs-tor`.
+The default mode uses Nostr relays for signaling. Relays are auto-discovered
+unless you override them.
 
 ```bash
-beam-rs-tor send /path/to/file
-```
-
-#### 3. WebRTC Mode - `beam-rs-webrtc send`
-*WebRTC transfers with Nostr signaling for NAT traversal.*
-> Built as a separate binary in this workspace: `cargo build -p beam-rs-webrtc`.
-
-```bash
-# Send with default Nostr relays
+# Send a file
 beam-rs-webrtc send /path/to/file
 
-# Send with custom relay
-beam-rs-webrtc send --relay wss://my-relay.com /path/to/file
+# Send a folder (auto-detected and archived)
+beam-rs-webrtc send /path/to/folder
 
-# Send using PIN
-beam-rs-webrtc send --pin /path/to/file
+# Use the built-in default relays instead of auto-discovery
+beam-rs-webrtc send --default-relays /path/to/file
 
-# Receive with code from sender
+# Use custom Nostr relay(s) (repeat --relay for multiple)
+beam-rs-webrtc send --relay wss://relay1.example.com --relay wss://relay2.example.com /path/to/file
+```
+
+Receiving:
+
+```bash
+# Receive with the code from the sender
 beam-rs-webrtc receive <BEAM_CODE>
 
-# Or prompt for code interactively
+# Or prompt for the code interactively
 beam-rs-webrtc receive
 
-# Receive using PIN
+# Receive into a specific directory
+beam-rs-webrtc receive <BEAM_CODE> --output /path/to/dir
+
+# Disable resumable transfers (don't save partial downloads)
+beam-rs-webrtc receive <BEAM_CODE> --no-resume
+```
+
+### PIN Mode
+
+PIN mode exchanges a short, verbally-shareable code via Nostr instead of the
+full beam code.
+
+```bash
+# Sender
+beam-rs-webrtc send --pin /path/to/file
+
+# Receiver (prompts for the PIN)
 beam-rs-webrtc receive --pin
 ```
 
-For copy/paste signaling when Nostr relays are unavailable, see [Manual Mode](#manual-mode).
-
-If WebRTC connection fails (e.g., both peers behind symmetric NAT), try iroh mode which has automatic relay fallback.
-
-#### Receiving (Internet)
-`beam-rs receive` receives iroh codes, `beam-rs-tor receive` receives Tor codes, and `beam-rs-webrtc receive` (or `receive-manual`) receives WebRTC codes.
-
-```bash
-beam-rs receive
-# Or with code directly
-beam-rs receive --code <BEAM_CODE>
-
-# Receive using PIN
-beam-rs receive --pin
-```
-
-For WebRTC PIN mode, use `beam-rs-webrtc send --pin` and
-`beam-rs-webrtc receive --pin`.
-
----
-
-### Local/Offline Transfers
-
-There are **two** ways to transfer without relying on the public internet:
-
-1) **LAN direct (recommended when both devices share a network)**
-   - `beam-rs send --local-only`: iroh transport with relays disabled; the
-     sender is discovered by mDNS and connected to directly
-   - Fast, no internet required; share the printed beam code with the receiver
-
-2) **Manual WebRTC (when mDNS is blocked but peers still have direct network reachability)**
-   - Uses WebRTC DataChannels with **manual** offer/answer code exchange
-   - Works even when Nostr relays are unavailable (see [Manual Mode](#manual-mode))
-
-> **Note**: Tor mode requires internet access. iroh mode can be air‑gapped when you self‑host the relay and point both sides at it via `--relay-url`; the default public relay requires internet access.
-
-#### LAN direct (`--local-only`)
-
-Use this mode for transfers on the same network (no internet required). It uses
-the same iroh transport and beam code as the default mode, but disables relays
-entirely: the beam code carries the sender endpoint ID without relay URLs, and
-the receiver resolves that endpoint on the LAN with mDNS. The receiver
-auto-detects local-only mode from the code (no flag needed).
-
-```bash
-# Send locally
-beam-rs send --local-only /path/to/file
-
-# Send folder locally
-beam-rs send --local-only /path/to/folder --folder
-
-# Receive locally (paste the printed beam code)
-beam-rs receive
-```
-
-> `--local-only` cannot be combined with `--pin` (PIN exchange uses Nostr, which
-> requires internet) or `--relay-url` (relays are disabled).
-
-### Manual Mode
+### Manual Mode (offline signaling)
 
 Use manual mode when Nostr relays are unavailable and both peers still have
-direct network reachability (for example, same LAN or routed private/VPN path).
+direct network reachability (for example, same LAN or a routed private/VPN
+path). Offer/answer codes are exchanged by copy-paste.
 
 ```bash
 # Sender
@@ -206,38 +125,31 @@ beam-rs-webrtc send-manual /path/to/file
 beam-rs-webrtc receive-manual
 ```
 
-Manual mode exchanges offer/answer codes via copy-paste. The codes contain the
-encryption key, so only share them through secure channels (SSH, remote
-desktop, encrypted chat).
+The manual offer/answer codes contain the encryption key, so only share them
+through a secure channel (SSH, remote desktop, encrypted chat).
 
 ## Common Use Cases
 
-See [USE_CASES.md](docs/USE_CASES.md) for detailed scenarios including:
-- **No Internet** - Air-gapped / Local LAN transfers
-- **Restricted Networks** - Firewall/NAT traversal options
-- **Anonymity** - Tor mode for anonymous transfers
-- **Self-Hosted** - Zero third-party dependency setups
+See [USE_CASES.md](docs/USE_CASES.md) for detailed scenarios.
 
 For protocol details and wire formats, see [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Security
 
-All modes provide end-to-end encryption.
-- **All modes (iroh, iroh `--local-only`, Tor, WebRTC)**: The **Beam Code** carries the key/address information.
+beam-rs-webrtc provides dual-layer end-to-end encryption: WebRTC's DTLS on the
+wire plus AES-256-GCM on the content. The **Beam Code** (or the manual
+offer/answer codes) carries the key material.
 
-| Mode | Type | Key Exchange | Transport Encryption | Content Encryption |
-|------|------|--------------|---------------------|-------------------|
-| iroh | Internet | Beam Code | QUIC/TLS 1.3 | AES-256-GCM |
-| iroh (`--local-only`) | LAN | Beam Code | QUIC/TLS 1.3 | AES-256-GCM |
-| Tor (`beam-rs-tor`) | Internet | Beam Code | Tor circuits | AES-256-GCM |
-| WebRTC | Internet | Beam Code | DTLS (WebRTC) | AES-256-GCM |
+| Signaling | Transport Encryption | Content Encryption | Key Exchange |
+|-----------|----------------------|--------------------|--------------|
+| Nostr (online) | DTLS (WebRTC) | AES-256-GCM | Beam Code |
+| Manual (offline) | DTLS (WebRTC) | AES-256-GCM | Offer/answer codes |
 
-All modes use dual-layer encryption (transport + content). `--local-only` is the
-same iroh transport with relays disabled, so it keeps QUIC/TLS 1.3 on the wire.
+Nostr relays are used only for signaling and never see decrypted content or the
+content-encryption key. Media flows directly peer-to-peer over the WebRTC data
+channel.
 
-Relay servers (iroh, Tor) never see decrypted content or encryption keys.
-
-For detailed security model, see [ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
+For the detailed security model, see [ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
 
 ## License
 

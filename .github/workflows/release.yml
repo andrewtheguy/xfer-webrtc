@@ -75,15 +75,6 @@ jobs:
       - name: Build Release
         run: cargo build --release --all-features --target ${{ matrix.target }}
 
-      - name: Rename Binary
-        run: mv target/${{ matrix.target }}/release/beam-rs target/release/beam-rs-${{ matrix.suffix }}
-
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.suffix }}
-          path: target/release/beam-rs-${{ matrix.suffix }}
-
       - name: Rename WebRTC Binary
         run: mv target/${{ matrix.target }}/release/beam-rs-webrtc target/release/beam-rs-webrtc-${{ matrix.suffix }}
 
@@ -92,15 +83,6 @@ jobs:
         with:
           name: release-webrtc-${{ matrix.suffix }}
           path: target/release/beam-rs-webrtc-${{ matrix.suffix }}
-
-      - name: Rename Tor Binary
-        run: mv target/${{ matrix.target }}/release/beam-rs-tor target/release/beam-rs-tor-${{ matrix.suffix }}
-
-      - name: Upload Tor release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-tor-${{ matrix.suffix }}
-          path: target/release/beam-rs-tor-${{ matrix.suffix }}
 
   build-macos:
     needs: setup
@@ -122,15 +104,6 @@ jobs:
       - name: Build Release
         run: cargo build --release --all-features --target ${{ matrix.target }}
 
-      - name: Rename Binary
-        run: mv target/${{ matrix.target }}/release/beam-rs target/release/beam-rs-${{ matrix.suffix }}
-
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.suffix }}
-          path: target/release/beam-rs-${{ matrix.suffix }}
-
       - name: Rename WebRTC Binary
         run: mv target/${{ matrix.target }}/release/beam-rs-webrtc target/release/beam-rs-webrtc-${{ matrix.suffix }}
 
@@ -139,15 +112,6 @@ jobs:
         with:
           name: release-webrtc-${{ matrix.suffix }}
           path: target/release/beam-rs-webrtc-${{ matrix.suffix }}
-
-      - name: Rename Tor Binary
-        run: mv target/${{ matrix.target }}/release/beam-rs-tor target/release/beam-rs-tor-${{ matrix.suffix }}
-
-      - name: Upload Tor release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-tor-${{ matrix.suffix }}
-          path: target/release/beam-rs-tor-${{ matrix.suffix }}
 
   build-windows:
     needs: setup
@@ -168,15 +132,6 @@ jobs:
       - name: Build Release
         run: cargo build --release --all-features --target ${{ env.TARGET }}
 
-      - name: Rename Binary
-        run: move target\${{ env.TARGET }}\release\beam-rs.exe target\release\beam-rs-${{ env.SUFFIX }}.exe
-
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ env.SUFFIX }}
-          path: target/release/beam-rs-${{ env.SUFFIX }}.exe
-
       - name: Rename WebRTC Binary
         run: move target\${{ env.TARGET }}\release\beam-rs-webrtc.exe target\release\beam-rs-webrtc-${{ env.SUFFIX }}.exe
 
@@ -185,15 +140,6 @@ jobs:
         with:
           name: release-webrtc-${{ env.SUFFIX }}
           path: target/release/beam-rs-webrtc-${{ env.SUFFIX }}.exe
-
-      - name: Rename Tor Binary
-        run: move target\${{ env.TARGET }}\release\beam-rs-tor.exe target\release\beam-rs-tor-${{ env.SUFFIX }}.exe
-
-      - name: Upload Tor release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-tor-${{ env.SUFFIX }}
-          path: target/release/beam-rs-tor-${{ env.SUFFIX }}.exe
 
   create-release:
     needs: [setup, build-linux, build-macos, build-windows]

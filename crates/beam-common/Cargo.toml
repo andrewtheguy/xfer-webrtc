@@ -5,9 +5,6 @@ edition.workspace = true
 
 [features]
 nostr = ["dep:nostr-sdk"]
-# Inline terminal UI. Optional so transports that don't use it (and downstream
-# binaries that opt out) don't pull in ratatui/crossterm.
-tui = ["dep:ratatui", "dep:crossterm", "dep:signal-hook"]
 
 [dependencies]
 # Core (workspace)
@@ -42,9 +39,3 @@ reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 # CLI (for PIN input)
 rustyline = "15"
 crc32fast = "1.4"
-
-# Inline TUI (optional, enabled by the `tui` feature)
-ratatui = { version = "0.30", optional = true }
-crossterm = { version = "0.29", features = ["event-stream"], optional = true }
-# Used only on unix (to re-raise SIGINT for graceful cancel), but builds everywhere.
-signal-hook = { version = "0.3", optional = true }

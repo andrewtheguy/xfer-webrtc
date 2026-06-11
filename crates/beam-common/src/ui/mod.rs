@@ -8,7 +8,7 @@
 //! to instead. A process installs exactly one sink via [`install`]; until then
 //! (and for transports that never install one), [`sink`] returns the default
 //! [`PlainSink`], which reproduces the original plain-text behaviour byte for
-//! byte. The `tui` feature provides an alternative sink (see [`crate::tui`]).
+//! byte.
 
 use anyhow::{Result, anyhow};
 use std::io::Write;
