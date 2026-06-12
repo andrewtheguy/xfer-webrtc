@@ -407,8 +407,7 @@ pub enum ReceiveInput {
 /// A manual offer is recognized by its leading BEGIN marker; anything else is
 /// treated as an automatic xfer code.
 pub fn read_code_or_offer() -> Result<ReceiveInput> {
-    println!("Enter the sender's xfer code, or paste the manual offer code");
-    println!("(including the {OFFER_BEGIN_MARKER} / {OFFER_END_MARKER} markers):");
+    println!("Enter the sender's xfer code, or paste the manual offer code:");
     std::io::stdout().flush().context("Failed to flush stdout")?;
 
     let stdin = std::io::stdin();
