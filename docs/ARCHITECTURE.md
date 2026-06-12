@@ -28,28 +28,30 @@ sequenceDiagram
     participant Receiver
 
     Sender->>Sender: 1. Create RTCPeerConnection + data channel
-    Sender->>Sender: 2. Create SDP offer
-    Sender->>Nostr: 3. Connect & Subscribe
-    Sender->>Nostr: 4. Publish Offer (SDP)
-
+    Sender->>Nostr: 2. Connect & Subscribe
     Note over Sender: Display xfer code (transfer-id, pubkey, relays, metadata)
-    Note over Sender: Gathering ICE candidates...
+    Note over Sender: Waiting for receiver's offer...
 
-    Sender-->>Nostr: (async) Publish ICE candidates as gathered
-
-    Receiver->>Nostr: 5. Connect & Subscribe (using xfer code)
-    Nostr->>Receiver: 6. Receive Offer (SDP)
-    Nostr-->>Receiver: (async) Receive Sender's ICE candidates
-
-    Receiver->>Receiver: 7. Create RTCPeerConnection
-    Receiver->>Receiver: 8. Set remote description, create SDP answer
-    Receiver->>Nostr: 9. Publish Answer (SDP)
+    Receiver->>Nostr: 3. Connect & Subscribe (using xfer code)
+    Receiver->>Receiver: 4. Create RTCPeerConnection + data channel
+    Receiver->>Receiver: 5. Create SDP offer
+    Receiver->>Nostr: 6. Publish Offer (SDP) addressed to sender pubkey
 
     Note over Receiver: Gathering ICE candidates...
-    Receiver-->>Nostr: (async) Publish ICE candidates as gathered
+    Receiver-->>Nostr: (async) Publish receiver ICE candidates
 
-    Nostr->>Sender: 10. Receive Answer (SDP)
+    Nostr->>Sender: 7. Receive Offer (SDP)
     Nostr-->>Sender: (async) Receive Receiver's ICE candidates
+
+    Sender->>Sender: 8. Set remote description, create SDP answer
+    Sender->>Nostr: 9. Publish Answer (SDP)
+
+    Note over Sender: Gathering ICE candidates...
+    Sender-->>Nostr: (async) Publish sender ICE candidates
+
+    Nostr->>Receiver: 10. Receive Answer (SDP)
+    Note over Receiver: Verify answer is signed by sender pubkey from xfer code
+    Nostr-->>Receiver: (async) Receive Sender's ICE candidates
 
     Note over Sender,Receiver: ICE connectivity checks, WebRTC connection established
 
@@ -140,11 +142,28 @@ sequenceDiagram
 - DTLS encryption for all data channel traffic
 - ICE consent for periodic connectivity verification
 
+### Signaling Authentication (online mode)
+
+Nostr events are signed by their author's key. The xfer code carries the
+sender's pubkey, so the receiver authenticates the SDP answer by requiring its
+event pubkey to equal the sender pubkey from the xfer code
+(`src/webrtc/receiver.rs`). Answers signed by any other key are ignored. This
+prevents an attacker who learns the transfer ID and receiver pubkey from relay
+traffic from racing a forged answer.
+
+The receiver's signaling key is ephemeral and not known to the sender ahead of
+time, so the sender cannot authenticate the offer pubkey; it accepts the first
+valid offer for its transfer ID. The DTLS handshake still establishes an
+encrypted channel between whichever two peers complete ICE.
+
 ### TTL (Time-To-Live) Validation
 
 All xfer codes and manual signaling offers include a creation timestamp and are
-validated against a TTL to prevent replay attacks and stale session
-establishment.
+validated against a TTL to limit staleness — they are rejected once older than
+the TTL. This bounds the window in which a leaked code or offer is usable; it is
+not full replay protection, since there is no one-time-use/nonce-consumption
+cache, so a valid code or offer can be reused any number of times within the
+TTL.
 
 **Implementation:**
 - **Token Version**: v5 tokens include a `created_at` Unix timestamp

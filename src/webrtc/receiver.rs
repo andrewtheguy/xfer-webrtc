@@ -73,7 +73,22 @@ async fn try_webrtc_receive(
     let answer_result: Result<()> = timeout(WEBRTC_CONNECTION_TIMEOUT, async {
         loop {
             match signal_rx.recv().await {
-                Some(SignalingMessage::Answer { sdp, .. }) => {
+                Some(SignalingMessage::Answer {
+                    sender_pubkey: answer_pubkey,
+                    sdp,
+                }) => {
+                    // Authenticate the answer: it must be signed by the sender
+                    // identified in the xfer code. Anyone who learns the transfer
+                    // ID and receiver pubkey via relay signaling could otherwise
+                    // race a forged answer.
+                    if &answer_pubkey != sender_pubkey {
+                        log::warn!(
+                            "Ignoring answer from unexpected pubkey {} (expected {})",
+                            answer_pubkey.to_hex(),
+                            sender_pubkey.to_hex()
+                        );
+                        continue;
+                    }
                     eprintln!("Received answer from sender");
                     let answer_sdp = RTCSessionDescription::answer(sdp.sdp)
                         .context("Failed to create answer SDP")?;

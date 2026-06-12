@@ -31,8 +31,14 @@ directly over a LAN or routed private/VPN network.
 
 **Solution**: **Manual Mode** (`send --manual` / `receive`)
 - **Why**: Signaling is exchanged by copy-paste instead of through a relay, so no
-  internet or third-party service is required. The data channel is still a direct
-  peer-to-peer WebRTC connection.
+  relay or third-party signaling service is required. The data channel is still a
+  direct peer-to-peer WebRTC connection.
+- **Note**: Manual mode only removes *relay signaling*. The peers are still
+  created with public STUN servers (`WebRtcPeer::new()`), so ICE will attempt to
+  contact them for reflexive candidates if the network allows it. For a true
+  air-gapped/LAN-only setup with no outbound STUN traffic, a no-STUN peer
+  constructor (`WebRtcPeer::new_offline()`) exists but is not currently wired
+  into the manual commands.
 - **Command**:
   ```bash
   # Sender

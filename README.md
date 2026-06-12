@@ -11,11 +11,11 @@ A secure, cross-platform, single-binary peer-to-peer file transfer tool built on
 - **End-to-end encrypted** — all traffic is carried over WebRTC's built-in DTLS encryption.
 - **Single static binary** — one native executable per platform, no runtime, package manager, or dependencies to install.
 - **Cross-platform** — Linux, macOS, and Windows.
-- **Two signaling modes** — online via auto-discovered Nostr relays, or fully offline manual copy-paste (no internet or third party required).
+- **Two signaling modes** — online via auto-discovered Nostr relays, or manual copy-paste signaling that needs no relay or third-party signaling service (note: peers still attempt public STUN servers for NAT traversal unless the network blocks them).
 - **Files and folders** — folders are auto-detected and archived (tar) before transfer.
-- **Resumable transfers** — interrupted file transfers can resume from where they stopped, with checksum verification of the partial data.
+- **Resumable transfers** — interrupted file transfers can resume from where they stopped, using a non-cryptographic xxHash64 checksum to match the partial data against the original file.
 - **NAT traversal** — STUN-based ICE negotiation establishes a direct connection across most networks.
-- **Replay protection** — xfer codes and manual offers carry a timestamp and expire after a TTL.
+- **Staleness protection** — xfer codes and manual offers carry a timestamp and expire after a TTL.
 
 ## Installation
 
@@ -130,9 +130,9 @@ For protocol details and wire formats, see [ARCHITECTURE.md](docs/ARCHITECTURE.m
 ## Security
 
 - **Encrypted transport** — the WebRTC data channel runs over DTLS, so all file data is encrypted in transit, with ICE consent checks verifying connectivity for the life of the session.
-- **No data on third parties** — Nostr relays and manual codes carry only signaling metadata (transfer ID, sender pubkey, relays, file metadata); file bytes never traverse a relay.
-- **Replay and staleness protection** — xfer codes and manual offers include a creation timestamp and expire after a 60-minute TTL (with a small allowance for clock skew), and are validated before the handshake.
-- **Integrity verification** — transfers carry a checksum so the receiver can detect corruption, including when resuming a partial download.
+- **No data on third parties** — file bytes never traverse a relay; only WebRTC signaling does. Note that signaling carries more than identifiers: Nostr events (and copied manual codes) include the SDP and ICE candidates, which expose your network candidate addresses (host/reflexive IPs and ports, in addition to the transfer ID, sender pubkey, relays, and file metadata) to the relays and to anyone who receives a copied code.
+- **Staleness protection** — xfer codes and manual offers include a creation timestamp and expire after a 60-minute TTL (with a small allowance for clock skew), and are validated before the handshake. This bounds how long a leaked code is usable but is not full replay protection: there is no one-time-use nonce, so a valid code can be reused within the TTL.
+- **Resume matching checksum** — transfers carry a non-cryptographic xxHash64 checksum used to match a partial download against the original file when resuming. It is corruption/identity matching for resume, not a cryptographic integrity guarantee, and there is no separate end-to-end hash verification of the fully received file (transport integrity is provided by DTLS).
 
 For the detailed security model, see [ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
 
