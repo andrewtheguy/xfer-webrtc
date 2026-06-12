@@ -11,11 +11,11 @@ use tokio::time::{Duration, timeout};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use beam_common::core::crypto::generate_key;
-use beam_common::core::transfer::{
+use crate::core::crypto::generate_key;
+use crate::core::transfer::{
     FileHeader, TransferType, format_bytes, run_sender_transfer, send_file_with, send_folder_with,
 };
-use beam_common::core::beam::generate_webrtc_code;
+use crate::core::beam::generate_webrtc_code;
 
 use crate::signaling::nostr::{NostrSignaling, SignalingMessage, create_sender_signaling};
 use crate::signaling::offline::ice_candidates_to_payloads;

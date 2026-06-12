@@ -8,8 +8,8 @@ use tokio::time::{Duration, timeout};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use beam_common::core::transfer::run_receiver_transfer;
-use beam_common::core::beam::{PROTOCOL_WEBRTC, decode_key, parse_code};
+use crate::core::transfer::run_receiver_transfer;
+use crate::core::beam::{PROTOCOL_WEBRTC, decode_key, parse_code};
 
 use crate::signaling::nostr::{NostrSignaling, SignalingMessage, create_receiver_signaling};
 use crate::signaling::offline::ice_candidates_to_payloads;

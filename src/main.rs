@@ -4,17 +4,15 @@
 //! Nostr relays for signaling. It supports both online (Nostr) and
 //! offline (copy/paste) signaling modes.
 //!
-//! Build with: cargo build -p beam-rs-webrtc
+//! Build with: cargo build --release
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use beam_common::core::transfer::is_interrupted;
 
-use crate::signaling::offline::ReceiveInput;
-
-mod signaling;
-mod webrtc;
+use beam_rs_webrtc::core::transfer::is_interrupted;
+use beam_rs_webrtc::signaling::offline::{self, ReceiveInput};
+use beam_rs_webrtc::webrtc;
 
 #[derive(Parser)]
 #[command(name = "beam-rs-webrtc")]
@@ -128,7 +126,7 @@ async fn async_main() -> Result<()> {
             // transfer; otherwise read from stdin and auto-detect the mode.
             let input = match code {
                 Some(c) => ReceiveInput::Code(c.trim().to_string()),
-                None => crate::signaling::offline::read_code_or_offer()?,
+                None => offline::read_code_or_offer()?,
             };
 
             match input {

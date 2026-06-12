@@ -10,7 +10,7 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use beam_common::core::transfer::{format_bytes, run_receiver_transfer};
+use crate::core::transfer::{format_bytes, run_receiver_transfer};
 
 use crate::signaling::offline::{
     OfflineAnswer, OfflineOffer, display_answer_json, ice_candidates_to_payloads,

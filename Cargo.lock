@@ -235,13 +235,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "beam-common"
-version = "0.0.2"
+name = "beam-rs-webrtc"
+version = "0.0.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
  "base64",
+ "bytes",
+ "clap",
  "crc32fast",
+ "env_logger",
  "fs4",
  "futures",
  "hex",
@@ -255,34 +258,12 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
- "tokio-util",
- "walkdir",
- "xxhash-rust",
-]
-
-[[package]]
-name = "beam-rs-webrtc"
-version = "0.0.2"
-dependencies = [
- "anyhow",
- "base64",
- "beam-common",
- "bytes",
- "clap",
- "crc32fast",
- "env_logger",
- "futures",
- "hex",
- "log",
- "nostr-sdk",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "tokio",
  "tokio-tungstenite 0.21.0",
  "tokio-util",
  "uuid",
+ "walkdir",
  "webrtc",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 use tokio::io::duplex;
-use beam_rs::core::crypto::{generate_key, CHUNK_SIZE};
-use beam_rs::core::transfer::{
+use beam_rs_webrtc::core::crypto::{generate_key, CHUNK_SIZE};
+use beam_rs_webrtc::core::transfer::{
     recv_chunk, recv_encrypted_chunk, recv_encrypted_header, recv_header, send_chunk,
     send_encrypted_chunk, send_encrypted_header, send_header, FileHeader, TransferType,
 };
@@ -448,7 +448,7 @@ async fn test_encrypted_wrong_key_fails_on_chunk() {
 
 #[tokio::test]
 async fn test_encrypted_different_keys_produce_different_payloads() {
-    use beam_rs::core::crypto::encrypt;
+    use beam_rs_webrtc::core::crypto::encrypt;
 
     // Same file content and metadata
     let data = b"Identical file content for both transfers";
@@ -477,7 +477,7 @@ async fn test_encrypted_different_keys_produce_different_payloads() {
 
 #[tokio::test]
 async fn test_encrypted_different_keys_produce_different_headers() {
-    use beam_rs::core::crypto::encrypt;
+    use beam_rs_webrtc::core::crypto::encrypt;
 
     // Same file metadata
     let header = FileHeader::new(TransferType::File, "same_file.txt".to_string(), 12345, 0);

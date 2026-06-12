@@ -40,7 +40,7 @@ use std::io::{BufRead, ErrorKind, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 
-use beam_common::core::beam::SESSION_TTL_SECS;
+use crate::core::beam::SESSION_TTL_SECS;
 
 use crate::signaling::nostr::IceCandidatePayload;
 

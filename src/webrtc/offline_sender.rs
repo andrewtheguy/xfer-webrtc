@@ -9,8 +9,8 @@ use tokio::time::Duration;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use beam_common::core::crypto::generate_key;
-use beam_common::core::transfer::{
+use crate::core::crypto::generate_key;
+use crate::core::transfer::{
     FileHeader, Interrupted, TransferType, prepare_file_for_send, prepare_folder_for_send,
     run_sender_transfer, setup_temp_file_cleanup_handler,
 };

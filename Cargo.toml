@@ -1,18 +1,21 @@
-[workspace]
-resolver = "2"
-members = [
-    "crates/beam-common",
-    "crates/beam-rs-webrtc",
-]
-
-[workspace.package]
-version = "0.0.2"
+[package]
+name = "beam-rs-webrtc"
+version = "0.0.3"
 edition = "2024"
+publish = false
 
-[workspace.dependencies]
-# Core dependencies shared by all crates
+[lib]
+name = "beam_rs_webrtc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "beam-rs-webrtc"
+path = "src/main.rs"
+
+[dependencies]
+# Core
 tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io", "compat"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,13 +25,31 @@ rand = "0.8"
 futures = "0.3"
 log = "0.4"
 
+# Cryptography
+aes-gcm = "0.10"
+
 # File handling
 tempfile = "3"
+tar = "0.4"
+walkdir = "2"
+fs4 = "0.12"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+# HTTP client for relay fetching
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 
 # Nostr signaling
 nostr-sdk = "0.44.1"
 
-# CLI
+# WebRTC transport
+webrtc = "0.14"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+crc32fast = "1.4"
+
+# CLI (interactive prompts + arg parsing)
+rustyline = "15"
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 

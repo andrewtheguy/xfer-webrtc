@@ -18,7 +18,7 @@ use tokio::time::Duration;
 /// Timeout for relay connections
 const RELAY_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-use beam_common::signaling::nostr_protocol::{
+use crate::signaling::nostr_protocol::{
     DEFAULT_NOSTR_RELAYS, generate_transfer_id, get_best_relays, nostr_file_transfer_kind,
 };
 
