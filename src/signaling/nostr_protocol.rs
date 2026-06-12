@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use futures::future::join_all;
+use ::rand::Rng;
 use nostr_sdk::prelude::*;
-use rand::Rng;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -295,8 +295,8 @@ async fn discover_best_relays() -> Vec<String> {
         .collect();
 
     // Shuffle randomly to avoid alphabetic bias (which would favor relays starting with numbers/early letters)
-    use rand::seq::SliceRandom;
-    discovered_relays.shuffle(&mut rand::thread_rng());
+    use ::rand::seq::SliceRandom;
+    discovered_relays.shuffle(&mut ::rand::rng());
 
     // Reserve slots for default relays
     let discovered_slots = MAX_RELAYS_TO_PROBE.saturating_sub(DEFAULT_NOSTR_RELAYS.len());
@@ -354,8 +354,8 @@ pub const TAG_TYPE: &str = "type";
 
 /// Generate a random transfer ID (16 bytes, hex encoded)
 pub fn generate_transfer_id() -> String {
-    let mut rng = rand::thread_rng();
-    let bytes: [u8; 16] = rng.r#gen();
+    let mut rng = ::rand::rng();
+    let bytes: [u8; 16] = rng.random();
     hex::encode(bytes)
 }
 

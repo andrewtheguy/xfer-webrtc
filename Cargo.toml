@@ -15,13 +15,12 @@ path = "src/main.rs"
 [dependencies]
 # Core
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["io", "compat"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 hex = "0.4"
-rand = "0.8"
+rand = "0.9"
 futures = "0.3"
 log = "0.4"
 
@@ -29,24 +28,21 @@ log = "0.4"
 tempfile = "3"
 tar = "0.4"
 walkdir = "2"
-fs4 = "0.12"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 # HTTP client for relay fetching
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
 
 # Nostr signaling
 nostr-sdk = "0.44.1"
 
 # WebRTC transport
-webrtc = "0.14"
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
-uuid = { version = "1", features = ["v4"] }
+webrtc = "0.17"
 bytes = "1"
 crc32fast = "1.4"
 
 # CLI (interactive prompts + arg parsing)
-rustyline = "15"
+rustyline = "18"
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 
