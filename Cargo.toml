@@ -34,6 +34,11 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }
 # HTTP client for relay fetching
 reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
 
+# Signaling payload encryption (shared-secret AEAD over the Nostr online path)
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+
 # Nostr signaling
 nostr-sdk = "0.44.1"
 

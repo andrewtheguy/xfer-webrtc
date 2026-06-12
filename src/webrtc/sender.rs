@@ -275,6 +275,7 @@ async fn transfer_data_webrtc_internal(
     // Generate xfer code
     let code = generate_webrtc_code(
         signaling.public_key().to_hex(),
+        signaling.psk_hex(),
         signaling.transfer_id().to_string(),
         signaling.relay_urls().to_vec(),
         filename.clone(),

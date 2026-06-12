@@ -28,38 +28,40 @@ sequenceDiagram
     participant Receiver
 
     Sender->>Sender: 1. Create RTCPeerConnection + data channel
-    Sender->>Nostr: 2. Connect & Subscribe
-    Note over Sender: Display xfer code (transfer-id, pubkey, relays, metadata)
+    Sender->>Sender: 2. Generate random shared key (PSK)
+    Sender->>Nostr: 3. Connect & Subscribe
+    Note over Sender: Display xfer code (transfer-id, pubkey, PSK, relays, metadata)
     Note over Sender: Waiting for receiver's offer...
 
-    Receiver->>Nostr: 3. Connect & Subscribe (using xfer code)
-    Receiver->>Receiver: 4. Create RTCPeerConnection + data channel
-    Receiver->>Receiver: 5. Create SDP offer
-    Receiver->>Nostr: 6. Publish Offer (SDP) addressed to sender pubkey
+    Receiver->>Nostr: 4. Connect & Subscribe (using xfer code)
+    Receiver->>Receiver: 5. Create RTCPeerConnection + data channel
+    Receiver->>Receiver: 6. Create SDP offer
+    Note over Receiver: Seal offer + ICE with PSK (XChaCha20-Poly1305)
+    Receiver->>Nostr: 7. Publish sealed Offer addressed to sender pubkey
 
     Note over Receiver: Gathering ICE candidates...
-    Receiver-->>Nostr: (async) Publish receiver ICE candidates
+    Receiver-->>Nostr: (async) Publish sealed receiver ICE candidates
 
-    Nostr->>Sender: 7. Receive Offer (SDP)
+    Nostr->>Sender: 8. Receive Offer (open with PSK; drop if it fails)
     Nostr-->>Sender: (async) Receive Receiver's ICE candidates
 
-    Sender->>Sender: 8. Set remote description, create SDP answer
-    Sender->>Nostr: 9. Publish Answer (SDP)
+    Sender->>Sender: 9. Set remote description, create SDP answer
+    Note over Sender: Seal answer + ICE with PSK
+    Sender->>Nostr: 10. Publish sealed Answer
 
     Note over Sender: Gathering ICE candidates...
-    Sender-->>Nostr: (async) Publish sender ICE candidates
+    Sender-->>Nostr: (async) Publish sealed sender ICE candidates
 
-    Nostr->>Receiver: 10. Receive Answer (SDP)
-    Note over Receiver: Verify answer is signed by sender pubkey from xfer code
+    Nostr->>Receiver: 11. Receive Answer (open with PSK; drop if it fails)
     Nostr-->>Receiver: (async) Receive Sender's ICE candidates
 
     Note over Sender,Receiver: ICE connectivity checks, WebRTC connection established
 
-    Sender->>Receiver: 11. Send Header
+    Sender->>Receiver: 12. Send Header
     alt User accepts transfer
-        Receiver->>Sender: 12. Send PROCEED
+        Receiver->>Sender: 13. Send PROCEED
     else User declines
-        Receiver->>Sender: 12. Send ABORT
+        Receiver->>Sender: 13. Send ABORT
     end
 
     loop 16KB chunks
@@ -124,14 +126,15 @@ sequenceDiagram
 - **Transport**: WebRTC DataChannel over DTLS
 - **Discovery**: Nostr relays for SDP/ICE signaling (relays auto-discovered, or custom relay URLs specified with repeatable `--relay`)
 - **NAT Traversal**: ICE with multiple public STUN servers (Google + Cloudflare)
-- **Xfer Code**: Transfer ID, sender pubkey, relays, and file metadata
+- **Xfer Code**: Transfer ID, sender pubkey, shared signaling key (PSK), relays, and file metadata
+- **Signaling Encryption**: SDP/ICE payloads sealed with the PSK (XChaCha20-Poly1305) before publishing to relays
 - **Encryption**: DTLS (WebRTC built-in)
 
 ### Manual WebRTC Mode (`xfer-webrtc send --manual`)
 - **Transport**: WebRTC DataChannel over DTLS
 - **Discovery**: Manual copy/paste offer and answer payloads containing SDP and ICE candidates
 - **NAT Traversal**: ICE with multiple public STUN servers (Google + Cloudflare)
-- **Offer Payload**: SDP, ICE candidates, file metadata, and creation timestamp
+- **Offer Payload**: SDP, ICE candidates, file metadata, and creation timestamp (exchanged directly between peers, not via a relay)
 - **Encryption**: DTLS (WebRTC built-in)
 
 ## Security Model
@@ -142,19 +145,41 @@ sequenceDiagram
 - DTLS encryption for all data channel traffic
 - ICE consent for periodic connectivity verification
 
-### Signaling Authentication (online mode)
+### Signaling Encryption & Authentication (online mode)
 
-Nostr events are signed by their author's key. The xfer code carries the
-sender's pubkey, so the receiver authenticates the SDP answer by requiring its
-event pubkey to equal the sender pubkey from the xfer code
-(`src/webrtc/receiver.rs`). Answers signed by any other key are ignored. This
-prevents an attacker who learns the transfer ID and receiver pubkey from relay
-traffic from racing a forged answer.
+The xfer code is a bearer capability shared out-of-band. In addition to routing
+information it carries a random 128-bit pre-shared key (PSK). Both peers derive a
+per-session AEAD key from it and seal every SDP/ICE payload they publish to
+relays:
 
-The receiver's signaling key is ephemeral and not known to the sender ahead of
-time, so the sender cannot authenticate the offer pubkey; it accepts the first
-valid offer for its transfer ID. The DTLS handshake still establishes an
-encrypted channel between whichever two peers complete ICE.
+- **Key derivation**: `key = HKDF-SHA256(ikm = PSK, salt = transfer_id,
+  info = "xfer-webrtc/v6/signaling")` → 32 bytes. Binding to `transfer_id` means
+  a PSK cannot be reused across transfers.
+- **Sealing**: XChaCha20-Poly1305 with a random 24-byte nonce; the associated
+  data binds each ciphertext to its `transfer_id` and message type
+  (`webrtc-offer` / `webrtc-answer`), so an offer ciphertext cannot be replayed
+  as an answer. Wire format in the Nostr event content is
+  `base64(nonce ‖ ciphertext‖tag)`. See `src/signaling/crypto.rs`.
+
+This gives two properties over the relay, **symmetrically in both directions**:
+
+- **Confidentiality**: relays (and anyone who merely observes relay traffic)
+  never see the SDP or ICE candidates, so local network candidate addresses are
+  not exposed.
+- **Authentication**: a payload that does not open under the PSK is dropped
+  (`parse_signaling_event` in `src/signaling/nostr.rs` returns `None`). Only a
+  holder of the code can produce a valid offer or answer, so an attacker who
+  learns the transfer ID and pubkeys from relay traffic cannot forge either one.
+  As defense-in-depth, the receiver additionally requires the answer's Nostr
+  event pubkey to equal the sender pubkey from the code (`src/webrtc/receiver.rs`).
+
+All of this rests on the secrecy of the code itself; sharing the code over a
+trusted out-of-band channel is the user's responsibility and out of scope for
+this tool. The DTLS handshake independently establishes an encrypted channel
+between whichever two peers complete ICE.
+
+Manual mode has no relay, so its offer/answer payloads are not separately
+encrypted — the copied codes carry SDP/ICE directly to the intended peer.
 
 ### TTL (Time-To-Live) Validation
 
@@ -166,7 +191,7 @@ cache, so a valid code or offer can be reused any number of times within the
 TTL.
 
 **Implementation:**
-- **Token Version**: v5 tokens include a `created_at` Unix timestamp
+- **Token Version**: v6 tokens include a `created_at` Unix timestamp
 - **TTL Duration**: 60 minutes (`SESSION_TTL_SECS = 3600`)
 - **Clock Skew**: Allows up to 60 seconds into the future to handle minor clock drift
 

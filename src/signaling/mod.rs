@@ -5,5 +5,6 @@ pub mod nostr_protocol;
 #[cfg(test)]
 mod nostr_protocol_test;
 
+pub mod crypto;
 pub mod nostr;
 pub mod offline;

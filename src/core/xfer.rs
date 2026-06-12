@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current token format version
-pub const CURRENT_VERSION: u8 = 5;
+pub const CURRENT_VERSION: u8 = 6;
 
 /// TTL for xfer sessions in seconds (1 hour)
 pub const SESSION_TTL_SECS: u64 = 3600;
@@ -21,6 +21,9 @@ pub struct XferToken {
     pub created_at: u64,
     /// Sender's ephemeral Nostr public key for signaling (hex)
     pub sender_pubkey: String,
+    /// Shared pre-shared key (hex) used to encrypt/authenticate signaling
+    /// payloads over the relay. Shared out-of-band as part of the xfer code.
+    pub psk: String,
     /// Unique transfer session ID
     pub transfer_id: String,
     /// List of Nostr relay URLs for signaling
@@ -44,6 +47,7 @@ pub fn current_timestamp() -> u64 {
 ///
 /// # Arguments
 /// * `sender_pubkey` - Sender's ephemeral Nostr public key for signaling (hex)
+/// * `psk` - Shared pre-shared key (hex) for encrypting signaling payloads
 /// * `transfer_id` - Unique transfer session ID
 /// * `relays` - List of Nostr relay URLs for signaling
 /// * `filename` - Original filename
@@ -54,6 +58,7 @@ pub fn current_timestamp() -> u64 {
 /// Returns an error if `transfer_type` is not "file" or "folder".
 pub fn generate_webrtc_code(
     sender_pubkey: String,
+    psk: String,
     transfer_id: String,
     relays: Vec<String>,
     filename: String,
@@ -72,6 +77,17 @@ pub fn generate_webrtc_code(
         anyhow::bail!(
             "Invalid sender_pubkey: expected 64-character hex string (32-byte Nostr pubkey), got {} chars",
             sender_pubkey.len()
+        );
+    }
+
+    // Validate psk format (PSK_LEN bytes = PSK_LEN*2 hex chars)
+    if psk.len() != crate::signaling::crypto::PSK_LEN * 2
+        || !psk.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        anyhow::bail!(
+            "Invalid psk: expected {}-character hex string, got {} chars",
+            crate::signaling::crypto::PSK_LEN * 2,
+            psk.len()
         );
     }
 
@@ -104,6 +120,7 @@ pub fn generate_webrtc_code(
         version: CURRENT_VERSION,
         created_at: current_timestamp(),
         sender_pubkey,
+        psk,
         transfer_id,
         relays,
         transfer_type: transfer_type.to_string(),
@@ -194,6 +211,14 @@ pub fn parse_code(code: &str) -> Result<XferToken> {
             "Invalid token: sender_pubkey must be a 64-character hex string"
         );
     }
+    if token.psk.len() != crate::signaling::crypto::PSK_LEN * 2
+        || !token.psk.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        anyhow::bail!(
+            "Invalid token: psk must be a {}-character hex string",
+            crate::signaling::crypto::PSK_LEN * 2
+        );
+    }
     if token.transfer_id.trim().is_empty() {
         anyhow::bail!("Invalid token: missing transfer ID");
     }
@@ -222,4 +247,73 @@ pub fn parse_code(code: &str) -> Result<XferToken> {
     }
 
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signaling::crypto::{PSK_LEN, generate_psk};
+
+    fn sample_pubkey() -> String {
+        "c453379cefb48ff0d94d434d5f90eb424a4a6f9713bf31251520772c4c9d5a18".to_string()
+    }
+
+    #[test]
+    fn code_roundtrip_preserves_psk() {
+        let psk = generate_psk();
+        let psk_hex = hex::encode(psk);
+        let code = generate_webrtc_code(
+            sample_pubkey(),
+            psk_hex.clone(),
+            "082962d8cde95b80a2813e002d79cc1d".to_string(),
+            vec!["wss://relay.example.com".to_string()],
+            "test.bin".to_string(),
+            "file",
+        )
+        .unwrap();
+
+        let token = parse_code(&code).unwrap();
+        assert_eq!(token.version, CURRENT_VERSION);
+        assert_eq!(token.psk, psk_hex);
+        // The hex round-trips back to the original key bytes.
+        let decoded: [u8; PSK_LEN] = hex::decode(&token.psk).unwrap().try_into().unwrap();
+        assert_eq!(decoded, psk);
+    }
+
+    #[test]
+    fn generate_rejects_bad_psk_length() {
+        let err = generate_webrtc_code(
+            sample_pubkey(),
+            "abcd".to_string(), // too short
+            "082962d8cde95b80a2813e002d79cc1d".to_string(),
+            vec!["wss://relay.example.com".to_string()],
+            "test.bin".to_string(),
+            "file",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("psk"));
+    }
+
+    #[test]
+    fn parse_rejects_non_hex_psk() {
+        let psk_hex = hex::encode(generate_psk());
+        let code = generate_webrtc_code(
+            sample_pubkey(),
+            psk_hex,
+            "082962d8cde95b80a2813e002d79cc1d".to_string(),
+            vec!["wss://relay.example.com".to_string()],
+            "test.bin".to_string(),
+            "file",
+        )
+        .unwrap();
+
+        // Corrupt the token's psk into a non-hex value and confirm parse rejects it.
+        let decoded = URL_SAFE_NO_PAD.decode(&code).unwrap();
+        let mut token: XferToken = serde_json::from_slice(&decoded).unwrap();
+        token.psk = "z".repeat(PSK_LEN * 2);
+        let bad_code = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&token).unwrap());
+
+        let err = parse_code(&bad_code).unwrap_err();
+        assert!(err.to_string().contains("psk"));
+    }
 }

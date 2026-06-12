@@ -18,6 +18,7 @@ use tokio::time::Duration;
 /// Timeout for relay connections
 const RELAY_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
+use crate::signaling::crypto::{self, PSK_LEN};
 use crate::signaling::nostr_protocol::{
     DEFAULT_NOSTR_RELAYS, generate_transfer_id, get_best_relays, nostr_file_transfer_kind,
 };
@@ -113,6 +114,8 @@ pub struct NostrSignaling {
     keys: Keys,
     transfer_id: String,
     relay_urls: Vec<String>,
+    /// Shared pre-shared key used to seal/open signaling payloads.
+    psk: [u8; PSK_LEN],
 }
 
 /// Validate that an event belongs to the specified transfer and parse it into a SignalingMessage.
@@ -120,7 +123,11 @@ pub struct NostrSignaling {
 /// This is a standalone function for use in spawned tasks where we can't use `&self`.
 /// Returns Some(SignalingMessage) if the event has the correct transfer tag and
 /// can be parsed as a valid signaling message, None otherwise.
-fn validate_and_parse_event_with_id(event: &Event, transfer_id: &str) -> Option<SignalingMessage> {
+fn validate_and_parse_event_with_id(
+    event: &Event,
+    psk: &[u8; PSK_LEN],
+    transfer_id: &str,
+) -> Option<SignalingMessage> {
     // Check if this is for our transfer
     let is_our_transfer = event.tags.iter().any(|t| {
         t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T))
@@ -128,7 +135,7 @@ fn validate_and_parse_event_with_id(event: &Event, transfer_id: &str) -> Option<
     });
 
     if is_our_transfer {
-        NostrSignaling::parse_signaling_event(event)
+        NostrSignaling::parse_signaling_event(event, psk, transfer_id)
     } else {
         None
     }
@@ -141,10 +148,11 @@ fn validate_and_parse_event_with_id(event: &Event, transfer_id: &str) -> Option<
 /// (channel closed).
 async fn process_event_for_receiver(
     event: &Event,
+    psk: &[u8; PSK_LEN],
     transfer_id: &str,
     tx: &mpsc::Sender<SignalingMessage>,
 ) -> bool {
-    if let Some(msg) = validate_and_parse_event_with_id(event, transfer_id)
+    if let Some(msg) = validate_and_parse_event_with_id(event, psk, transfer_id)
         && tx.send(msg).await.is_err()
     {
         log::debug!("Message receiver channel closed, stopping background task");
@@ -177,12 +185,18 @@ impl NostrSignaling {
             keys,
             transfer_id,
             relay_urls,
+            psk: crypto::generate_psk(),
         })
     }
 
     /// Get our public key
     pub fn public_key(&self) -> PublicKey {
         self.keys.public_key()
+    }
+
+    /// Get the shared pre-shared key as a hex string (for embedding in the xfer code)
+    pub fn psk_hex(&self) -> String {
+        hex::encode(self.psk)
     }
 
     /// Get the transfer ID
@@ -233,7 +247,13 @@ impl NostrSignaling {
             sdp_type: "offer".to_string(),
             candidates,
         };
-        let content = STANDARD.encode(serde_json::to_string(&payload)?);
+        let sealed = crypto::seal(
+            &self.psk,
+            &self.transfer_id,
+            SIGNALING_TYPE_OFFER,
+            &serde_json::to_vec(&payload)?,
+        )?;
+        let content = STANDARD.encode(sealed);
 
         let event = self.create_signaling_event(receiver_pubkey, SIGNALING_TYPE_OFFER, &content)?;
 
@@ -257,7 +277,13 @@ impl NostrSignaling {
             sdp_type: "answer".to_string(),
             candidates,
         };
-        let content = STANDARD.encode(serde_json::to_string(&payload)?);
+        let sealed = crypto::seal(
+            &self.psk,
+            &self.transfer_id,
+            SIGNALING_TYPE_ANSWER,
+            &serde_json::to_vec(&payload)?,
+        )?;
+        let content = STANDARD.encode(sealed);
 
         let event = self.create_signaling_event(sender_pubkey, SIGNALING_TYPE_ANSWER, &content)?;
 
@@ -290,8 +316,16 @@ impl NostrSignaling {
         Ok(())
     }
 
-    /// Parse a signaling event into a SignalingMessage
-    fn parse_signaling_event(event: &Event) -> Option<SignalingMessage> {
+    /// Parse a signaling event into a SignalingMessage.
+    ///
+    /// The payload is sealed with the shared PSK, so decryption success is what
+    /// authenticates the message: an event that does not open under our PSK
+    /// (forged, tampered, or for another transfer) is dropped by returning None.
+    fn parse_signaling_event(
+        event: &Event,
+        psk: &[u8; PSK_LEN],
+        transfer_id: &str,
+    ) -> Option<SignalingMessage> {
         // Get event type
         let event_type = event
             .tags
@@ -302,7 +336,8 @@ impl NostrSignaling {
         match event_type {
             SIGNALING_TYPE_OFFER => {
                 let decoded = STANDARD.decode(&event.content).ok()?;
-                let payload: SdpPayload = serde_json::from_slice(&decoded).ok()?;
+                let plaintext = crypto::open(psk, transfer_id, SIGNALING_TYPE_OFFER, &decoded)?;
+                let payload: SdpPayload = serde_json::from_slice(&plaintext).ok()?;
                 Some(SignalingMessage::Offer {
                     sender_pubkey: event.pubkey,
                     sdp: payload,
@@ -310,7 +345,8 @@ impl NostrSignaling {
             }
             SIGNALING_TYPE_ANSWER => {
                 let decoded = STANDARD.decode(&event.content).ok()?;
-                let payload: SdpPayload = serde_json::from_slice(&decoded).ok()?;
+                let plaintext = crypto::open(psk, transfer_id, SIGNALING_TYPE_ANSWER, &decoded)?;
+                let payload: SdpPayload = serde_json::from_slice(&plaintext).ok()?;
                 Some(SignalingMessage::Answer {
                     sender_pubkey: event.pubkey,
                     sdp: payload,
@@ -330,6 +366,7 @@ impl NostrSignaling {
         let (tx, rx) = mpsc::channel(100);
         let client = self.client.clone();
         let transfer_id = self.transfer_id.clone();
+        let psk = self.psk;
 
         let handle = tokio::spawn(async move {
             let mut notifications = client.notifications();
@@ -337,14 +374,14 @@ impl NostrSignaling {
             loop {
                 match notifications.recv().await {
                     Ok(RelayPoolNotification::Event { event, .. }) => {
-                        if !process_event_for_receiver(&event, &transfer_id, &tx).await {
+                        if !process_event_for_receiver(&event, &psk, &transfer_id, &tx).await {
                             break;
                         }
                     }
                     Ok(RelayPoolNotification::Message { message, .. }) => {
                         // Handle Event messages that come through as Message notifications
                         if let nostr_sdk::RelayMessage::Event { event, .. } = message
-                            && !process_event_for_receiver(&event, &transfer_id, &tx).await
+                            && !process_event_for_receiver(&event, &psk, &transfer_id, &tx).await
                         {
                             break;
                         }
@@ -384,6 +421,7 @@ pub async fn create_sender_signaling(
 pub async fn create_receiver_signaling(
     transfer_id: &str,
     relay_urls: Vec<String>,
+    psk: [u8; PSK_LEN],
 ) -> Result<NostrSignaling> {
     let keys = Keys::generate();
     let client = setup_client_with_relays(&keys, &relay_urls).await?;
@@ -393,6 +431,7 @@ pub async fn create_receiver_signaling(
         keys,
         transfer_id: transfer_id.to_string(),
         relay_urls,
+        psk,
     };
 
     signaling.subscribe().await?;
