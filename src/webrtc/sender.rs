@@ -7,11 +7,11 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncBufReadExt;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, timeout, timeout_at};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use crate::core::xfer::generate_webrtc_code;
+use crate::core::xfer::{SESSION_TTL_SECS, generate_webrtc_code};
 use crate::core::transfer::{
     FileHeader, TransferType, format_bytes, run_sender_transfer, send_file_with, send_folder_with,
 };
@@ -20,8 +20,14 @@ use crate::signaling::nostr::{NostrSignaling, SignalingMessage, create_sender_si
 use crate::signaling::offline::ice_candidates_to_payloads;
 use crate::webrtc::common::{DataChannelStream, WebRtcPeer};
 
-/// Connection timeout for WebRTC handshake
-const WEBRTC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the sender waits for a receiver to connect (offer to arrive over Nostr).
+/// Tied to the session TTL: the xfer code is valid for the TTL, so the sender
+/// should stay available for the same window.
+const WAIT_FOR_RECEIVER_TIMEOUT: Duration = Duration::from_secs(SESSION_TTL_SECS);
+
+/// Connection timeout for the WebRTC handshake once a receiver has connected
+/// (offer received, answer sent — waiting for ICE/DTLS to bring up the data channel).
+const WEBRTC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Check if an error is a signaling-related error (vs file/transfer error).
 ///
@@ -140,9 +146,13 @@ async fn try_webrtc_transfer(
 
     let receiver_pubkey;
 
-    // Wait loop with timeout to prevent hanging indefinitely
+    // Absolute deadline so the total wait is bounded by the session TTL,
+    // regardless of how many unrelated relay messages arrive in the meantime.
+    let deadline = tokio::time::Instant::now() + WAIT_FOR_RECEIVER_TIMEOUT;
+
+    // Wait loop with deadline to prevent hanging indefinitely
     loop {
-        let recv_result = timeout(WEBRTC_CONNECTION_TIMEOUT, signal_rx.recv()).await;
+        let recv_result = timeout_at(deadline, signal_rx.recv()).await;
 
         match recv_result {
             Ok(Some(SignalingMessage::Offer { sender_pubkey, sdp })) => {
@@ -206,7 +216,7 @@ async fn try_webrtc_transfer(
 
     // Wait for data channel to open
     eprintln!("Waiting for data channel to open...");
-    let open_result = timeout(WEBRTC_CONNECTION_TIMEOUT, open_rx).await;
+    let open_result = timeout(WEBRTC_HANDSHAKE_TIMEOUT, open_rx).await;
 
     match open_result {
         Err(_) => {
