@@ -20,6 +20,51 @@ encrypted metadata and WebRTC signaling events.
 
 ## Install
 
+The release installers fetch a native, standalone executable. You only need the
+binary in your PATH; no runtime dependencies or package managers are required.
+
+### Quick Install (Linux & macOS)
+
+The shell installer supports Linux x86_64/aarch64 and macOS Apple Silicon.
+
+```bash
+curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash
+```
+
+By default the installer pulls the latest **stable** release. Use `--prerelease`
+for the newest prerelease, or pass an explicit tag to pin to a specific build.
+Examples:
+
+```bash
+# Latest prerelease
+curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash -s -- --prerelease
+
+# Pin to a specific tag
+curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash -s <release-tag>
+```
+
+### Quick Install (Windows)
+
+The Windows installer supports x86_64 (AMD64).
+
+```powershell
+irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
+```
+
+By default the PowerShell installer pulls the latest **stable** release. Because
+parameter binding is unavailable when piping into `iex`, pass flags via
+`$env:XFER_INSTALL_ARGS`. Examples:
+
+```powershell
+# Latest prerelease
+$env:XFER_INSTALL_ARGS='-PreRelease'; irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
+
+# Pin to a specific tag
+$env:XFER_INSTALL_ARGS='<release-tag>'; irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
+```
+
+### From Source
+
 ```bash
 cargo build --release --all-features
 ```
