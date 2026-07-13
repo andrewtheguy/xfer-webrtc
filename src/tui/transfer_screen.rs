@@ -14,7 +14,6 @@ use ratatui::style::Stylize;
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::crypto::pin::{compute_pin_fingerprint, format_pin_fingerprint};
 use crate::ui::{Direction, FileExistsChoice, UiEvent};
 use crate::util::{OnConflict, calc_percent, format_bytes};
 use crate::{archive, ui, webrtc};
@@ -66,6 +65,10 @@ pub async fn run(terminal: &mut DefaultTerminal, plan: WizardPlan) -> Result<()>
                 } else if state.outcome.is_some() {
                     // Any key on the final screen exits with the transfer's result.
                     return state.outcome.take().expect("checked above");
+                } else if key.code == KeyCode::Char('r') && state.pin.is_some() {
+                    // Mint and publish a fresh PIN, invalidating every
+                    // previously shown one (e.g. it was exposed to a bystander).
+                    ui::request_pin_refresh();
                 }
             }
 
@@ -96,7 +99,7 @@ async fn run_plan(plan: WizardPlan) -> Result<()> {
                     .await??;
             webrtc::send_file_nostr(&source).await
         }
-        WizardPlan::ReceiveNostr { pin, output } => {
+        WizardPlan::ReceiveNostr { pin, output, .. } => {
             webrtc::receive_file_nostr(&pin, Some(output), OnConflict::Prompt).await
         }
         // Manual plans never reach the transfer screen: tui::run tears the
@@ -126,10 +129,9 @@ impl State {
     fn new(plan: &WizardPlan) -> Self {
         let (title, fingerprint) = match plan {
             WizardPlan::SendNostr(_) => ("sending", None),
-            WizardPlan::ReceiveNostr { pin, .. } => (
-                "receiving",
-                Some(format_pin_fingerprint(&compute_pin_fingerprint(pin))),
-            ),
+            WizardPlan::ReceiveNostr { fingerprint, .. } => {
+                ("receiving", Some(fingerprint.clone()))
+            }
             WizardPlan::SendManual(_) | WizardPlan::ReceiveManual { .. } => {
                 unreachable!("manual plans run outside the TUI")
             }
@@ -174,6 +176,10 @@ impl State {
                 self.pin = Some(pin);
                 self.fingerprint = Some(fingerprint);
             }
+            UiEvent::HidePin => {
+                self.pin = None;
+                self.fingerprint = None;
+            }
             UiEvent::Incoming { file_name, size } => {
                 self.incoming = Some(format!("{file_name} ({})", format_bytes(size)));
             }
@@ -208,6 +214,8 @@ impl State {
             "press any key to exit"
         } else if self.modal.is_some() {
             "o overwrite · r rename · c cancel"
+        } else if self.pin.is_some() {
+            "r new PIN · Ctrl-C abort"
         } else {
             "Ctrl-C abort"
         };

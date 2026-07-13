@@ -5,7 +5,10 @@
 //! single-file protocol, mirroring the web app's `compressFilesToZip`:
 //! folder entries are keyed `<folderName>/sub/file.ext` (forward slashes),
 //! loose files are keyed by bare basename, and the archive is named
-//! `<folder>.zip` when exactly one folder is selected, else `files.zip`.
+//! `<folder>_<yyyymmddhhmmss>.zip` when exactly one folder is selected, else
+//! `files_<yyyymmddhhmmss>.zip` — the local-time stamp (the web app's
+//! `archiveTimestamp`) keeps repeated sends of the same selection from all
+//! arriving under one file name.
 //! Only file entries are written: empty directories are omitted and no
 //! explicit directory entries are added. File symlinks are followed;
 //! directory symlinks inside a walked folder are skipped (with a warning) so
@@ -100,16 +103,17 @@ fn single_file_source(path: &Path, file_size: u64, cap: u64) -> Result<SendSourc
 fn check_size_cap(file_size: u64, cap: u64) -> Result<()> {
     if file_size > cap {
         bail!(
-            "File is {:.0} MB, which exceeds the {} MB limit",
-            file_size as f64 / 1024.0 / 1024.0,
-            cap / 1024 / 1024
+            "File is {}, which exceeds the {} limit",
+            crate::util::format_bytes(file_size),
+            crate::util::format_bytes(cap)
         );
     }
     Ok(())
 }
 
-/// The wire file name a selection will travel under, without walking any
-/// directory tree (cheap enough to call on every TUI redraw).
+/// The wire file name a selection will travel under — minus the local-time
+/// stamp appended at packaging time — without walking any directory tree
+/// (cheap enough to call on every TUI redraw).
 pub fn send_display_name(inputs: &[PathBuf]) -> String {
     match inputs {
         [single] if single.is_dir() => match input_name(single) {
@@ -119,6 +123,12 @@ pub fn send_display_name(inputs: &[PathBuf]) -> String {
         [single] => input_name(single).unwrap_or_else(|_| "file".to_string()),
         _ => "files.zip".to_string(),
     }
+}
+
+/// Local-time `yyyymmddhhmmss` stamp appended to archive names. Mirrors
+/// secure-send-web's `archiveTimestamp`.
+fn archive_timestamp() -> String {
+    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
 }
 
 /// Plan the ZIP: sorted `(entry_key, source_path)` pairs plus the archive's
@@ -148,9 +158,10 @@ fn plan_entries(inputs: &[PathBuf]) -> Result<(Vec<(String, PathBuf)>, String)> 
         bail!("Nothing to send: the selection contains no files");
     }
 
+    let stamp = archive_timestamp();
     let archive_name = match (folder_names.as_slice(), file_count) {
-        ([folder], 0) => format!("{folder}.zip"),
-        _ => "files.zip".to_string(),
+        ([folder], 0) => format!("{folder}_{stamp}.zip"),
+        _ => format!("files_{stamp}.zip"),
     };
 
     Ok((entries.into_iter().collect(), archive_name))
@@ -250,6 +261,16 @@ mod tests {
         entries.iter().map(|(k, _)| k.as_str()).collect()
     }
 
+    /// Assert `name` is `<base>_<yyyymmddhhmmss>.zip`.
+    fn assert_stamped_name(name: &str, base: &str) {
+        let stamp = name
+            .strip_prefix(&format!("{base}_"))
+            .and_then(|rest| rest.strip_suffix(".zip"))
+            .unwrap_or_else(|| panic!("unexpected archive name: {name}"));
+        assert_eq!(stamp.len(), 14, "unexpected timestamp in {name}");
+        assert!(stamp.bytes().all(|b| b.is_ascii_digit()), "unexpected timestamp in {name}");
+    }
+
     #[test]
     fn single_file_is_passthrough() {
         let dir = tempfile::tempdir().unwrap();
@@ -276,7 +297,7 @@ mod tests {
         write(dir.path(), "photos/a.jpg", "a");
         write(dir.path(), "photos/albums/b.jpg", "b");
         let (entries, name) = plan_entries(&[dir.path().join("photos")]).unwrap();
-        assert_eq!(name, "photos.zip");
+        assert_stamped_name(&name, "photos");
         assert_eq!(keys(&entries), ["photos/a.jpg", "photos/albums/b.jpg"]);
     }
 
@@ -286,7 +307,7 @@ mod tests {
         let a = write(dir.path(), "b.txt", "b");
         let b = write(dir.path(), "a.txt", "a");
         let (entries, name) = plan_entries(&[a, b]).unwrap();
-        assert_eq!(name, "files.zip");
+        assert_stamped_name(&name, "files");
         assert_eq!(keys(&entries), ["a.txt", "b.txt"]); // sorted by key
     }
 
@@ -296,7 +317,7 @@ mod tests {
         write(dir.path(), "docs/x.md", "x");
         let loose = write(dir.path(), "notes.txt", "n");
         let (entries, name) = plan_entries(&[dir.path().join("docs"), loose]).unwrap();
-        assert_eq!(name, "files.zip");
+        assert_stamped_name(&name, "files");
         assert_eq!(keys(&entries), ["docs/x.md", "notes.txt"]);
     }
 
@@ -354,7 +375,7 @@ mod tests {
         write(dir.path(), "bundle/a.txt", "alpha");
         write(dir.path(), "bundle/sub/b.txt", "beta");
         let source = prepare_send_source(&[dir.path().join("bundle")]).unwrap();
-        assert_eq!(source.file_name, "bundle.zip");
+        assert_stamped_name(&source.file_name, "bundle");
         assert_eq!(source.mime_type, "application/zip");
         assert!(source.file_size > 0);
 

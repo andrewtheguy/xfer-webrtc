@@ -7,32 +7,77 @@ of truth for protocol shape and compatibility.
 
 ### Nostr PIN Mode
 
-This is the default mode.
+This is the default mode. The PIN authenticates the handshake; it derives no
+content keys. Signaling and content keys come from an ephemeral P-256 ECDH
+exchange.
 
-1. Sender generates a 12-character PIN, 16-byte salt, transfer id, and ephemeral
-   Nostr key.
-2. Sender derives three PBKDF2-SHA256 AES-256-GCM keys from the PIN and salt:
-   metadata, signals, and P2P content.
-3. Sender publishes a kind `24243` PIN exchange event:
-   - `content`: `base64(nonce || ciphertext || tag)` encrypted with the metadata key.
-   - tags: `h`, `s`, `t`, `type=pin_exchange`, `expiration`.
-4. Receiver derives current and previous time-bucket PIN hints, fetches matching
-   kind `24243` events, derives keys from the event salt, and decrypts metadata.
-5. Receiver publishes a kind `24242` authenticated ACK with `seq=0`, encrypted
-   with the signals key.
-6. Sender and receiver exchange encrypted kind `24242` WebRTC signal events:
-   `offer`, `answer`, and `candidate`.
+**PIN and PIN root.** The PIN is 10 Crockford-base32 characters (9 data + 1
+position-weighted checksum), displayed as `XXXXX-XXXXX`. Entry canonicalizes
+lowercase and the look-alikes `O -> 0`, `I/L -> 1` and drops separators. The
+PIN root is `PBKDF2-SHA256(pin, "secure-send:pin-root:v2", 600k)`; every
+PIN-scoped value is an HKDF-SHA256 expansion off it (salt
+`secure-send:pin:v2`) with a distinct info label:
+
+- `hint:<bucket>` — 16-hex-char event lookup tag, scoped to the 2-minute
+  rotation bucket (`floor(now_ms / 120000)`).
+- `auth` — AES-256-GCM key sealing the claim/confirm handshake payloads.
+- `rendezvous` — AES-256-GCM key sealing the rendezvous payload.
+- `fingerprint` — 8 uppercase base32 chars, shown locally on both sides for a
+  human visual check; never published.
+
+**Rotation.** The sender mints and publishes a fresh PIN every 2 minutes
+(`PIN_ROTATION_MS`), honors the 3 most recent generations
+(`PIN_ACTIVE_GENERATIONS`) when verifying claims, and attaches a NIP-40
+expiration of 6 minutes (`PIN_TTL_MS`) to each rendezvous event. The receiver
+derives hints for the current bucket plus 3 look-back buckets and refuses
+rendezvous events older than `PIN_TTL_MS`. The TUI `r` key (and the web app's
+refresh button) mints a fresh PIN immediately, dropping all retained
+generations. The sender keeps rotating for up to 30 minutes — a resource
+backstop, not a security bound — before giving up.
+
+**Handshake.**
+
+1. Sender generates a 16-byte salt, transfer id, ephemeral Nostr key, and an
+   ephemeral P-256 ECDH key pair; per rotation it publishes a kind `24243`
+   rendezvous event:
+   - `content`: `base64(nonce || ciphertext || tag)` sealed with the
+     rendezvous key; payload carries `type=rendezvous`, transfer id, the
+     sender's Nostr pubkey and ECDH public key (base64, 65-byte uncompressed),
+     a fresh handshake nonce, relays, and file metadata.
+   - tags: `h`, `s` (salt), `t`, `type=rendezvous`, `expiration`.
+2. Receiver derives the hints, fetches matching kind `24243` events, decrypts
+   the freshest candidate, and validates that the sealed payload names the
+   event's own author and transfer id (a copied ciphertext republished under
+   another identity is rejected).
+3. Receiver publishes a kind `24242` claim (`type=claim`, tags `p=<sender>`,
+   `t`) sealed with the auth key: it echoes the sender's nonce and ECDH key,
+   and contributes a fresh receiver nonce and the receiver's ECDH public key.
+4. Sender verifies the claim against every retained PIN generation, locks the
+   transfer to the first valid claimant, stops rotating, and replies with a
+   kind `24242` confirm (`type=confirm`) sealed with the same auth key,
+   echoing both nonces and the receiver's ECDH key.
+5. Both sides run ECDH and derive the session keys with HKDF-SHA256 over the
+   shared X coordinate and the public transfer salt:
+   `secure-send:nostr-session:v2:signals` (relay-carried WebRTC signaling) and
+   `secure-send:nostr-session:v2:content` (P2P file chunks).
+6. Sender and receiver exchange kind `24242` WebRTC signal events (`offer`,
+   `answer`, `candidate`), encrypted with the session signals key.
    - Signal events use tags `t`, `p=<sender pubkey>`, and `type=signal`.
    - Sender-side answer subscriptions filter by `t`, `p=<sender pubkey>`, and
      receiver author.
    - Receiver-side offer subscriptions filter by `t` and sender author only,
      matching `secure-send-web`.
    - Offer and answer bundles are republished while the P2P connection is
-     pending so relay misses do not strand the session.
-7. File bytes transfer directly over the WebRTC data channel using the P2P
-   content key.
+     pending so relay misses do not strand the session, and each bundle's
+     events are published concurrently so one slow relay does not serialize
+     the exchange.
+7. File bytes transfer directly over the WebRTC data channel using the session
+   content key. Completion is the data channel `ACK`; no relay event is
+   published after signaling.
 
-Default relays match `secure-send-web`.
+Default relays match `secure-send-web`. Transport is direct-only: STUN servers
+assist NAT traversal, but no TURN relay is configured, so a transfer fails
+rather than route file bytes through a relay.
 
 ### Manual SS03 Mode
 
@@ -89,6 +134,10 @@ wall-clock deadline. The sender applies the window to each chunk hand-off while
 waiting for WebRTC backpressure to clear and sending the message. The receiver
 arms the same window once the data channel is open and resets it for every
 incoming data-channel message, including `DONE:<total_chunks>`.
+
+The maximum transfer size is 2 GiB (`MAX_MESSAGE_SIZE`), matching
+`secure-send-web`; both ends stream chunk by chunk (the CLI to/from disk), so
+the bound comes from the 2-byte chunk-index range, not RAM.
 
 ## Scope
 

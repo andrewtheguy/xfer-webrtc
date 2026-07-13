@@ -12,7 +12,7 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::Paragraph;
 
 use crate::crypto::pin::{
-    PIN_LENGTH, compute_pin_fingerprint, format_pin_fingerprint, is_pin_char, is_valid_pin,
+    PIN_LENGTH, PinRoot, canonical_pin_char, format_pin, format_pin_fingerprint, is_valid_pin,
 };
 
 use super::dir_picker::{DirPicker, DirPickerStep};
@@ -27,7 +27,13 @@ pub enum WizardPlan {
     /// Leaves the TUI so the SS03 blobs can be copy/pasted.
     SendManual(Vec<PathBuf>),
     /// Stays in the TUI.
-    ReceiveNostr { pin: String, output: PathBuf },
+    ReceiveNostr {
+        pin: String,
+        /// Formatted fingerprint of `pin`, computed during entry so the
+        /// transfer screen doesn't redo the PBKDF2 stretch.
+        fingerprint: String,
+        output: PathBuf,
+    },
     /// Leaves the TUI so the SS03 blobs can be copy/pasted.
     ReceiveManual { output: PathBuf },
 }
@@ -204,7 +210,12 @@ fn pin_entry_key(
     match key.code {
         KeyCode::Enter => {
             if is_valid_pin(&input) {
-                Step::Finish(WizardPlan::ReceiveNostr { pin: input, output })
+                let fingerprint = fingerprint.unwrap_or_else(|| pin_fingerprint(&input));
+                Step::Finish(WizardPlan::ReceiveNostr {
+                    pin: input,
+                    fingerprint,
+                    output,
+                })
             } else {
                 Step::Continue(Screen::PinEntry {
                     output,
@@ -227,12 +238,15 @@ fn pin_entry_key(
                 error: None,
             })
         }
-        KeyCode::Char(c) if is_pin_char(c) && input.len() < PIN_LENGTH => {
-            input.push(c);
+        // Typed characters are canonicalized like secure-send-web's PIN box:
+        // lowercase is uppercased, O -> 0 and I/L -> 1; separators and other
+        // characters are ignored.
+        KeyCode::Char(c) if input.len() < PIN_LENGTH && canonical_pin_char(c).is_some() => {
+            input.push(canonical_pin_char(c).expect("guarded above"));
             if input.len() == PIN_LENGTH && is_valid_pin(&input) {
-                // One-time PBKDF2 (~200k iterations); worth the beat for the
-                // visual check against the sender's fingerprint.
-                fingerprint = Some(format_pin_fingerprint(&compute_pin_fingerprint(&input)));
+                // One-time PBKDF2 stretch (~600k iterations); worth the beat
+                // for the visual check against the sender's fingerprint.
+                fingerprint = Some(pin_fingerprint(&input));
             }
             Step::Continue(Screen::PinEntry {
                 output,
@@ -248,6 +262,11 @@ fn pin_entry_key(
             error,
         }),
     }
+}
+
+/// Formatted fingerprint of a complete, valid PIN (blocking PBKDF2 stretch).
+fn pin_fingerprint(pin: &str) -> String {
+    format_pin_fingerprint(&PinRoot::derive(pin).fingerprint())
 }
 
 fn draw(f: &mut Frame, screen: &mut Screen) {
@@ -331,10 +350,10 @@ fn draw(f: &mut Frame, screen: &mut Screen) {
             ])
             .areas(area);
             f.render_widget(
-                Paragraph::new("Enter the sender's 12-character PIN:"),
+                Paragraph::new("Enter the sender's 10-character PIN (XXXXX-XXXXX):"),
                 title,
             );
-            widgets::input_line(f, line, "PIN: ", input);
+            widgets::input_line(f, line, "PIN: ", &format_pin(input));
             if let Some(error) = error {
                 widgets::error_line(f, extra, error);
             } else if let Some(fp) = fingerprint {

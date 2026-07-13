@@ -30,9 +30,9 @@ pub async fn send_file_manual(source: &SendSource) -> Result<()> {
 
     if file_size > MAX_MESSAGE_SIZE {
         bail!(
-            "File is {:.0} MB, which exceeds the {} MB limit",
-            file_size as f64 / 1024.0 / 1024.0,
-            MAX_MESSAGE_SIZE / 1024 / 1024
+            "File is {}, which exceeds the {} limit",
+            crate::util::format_bytes(file_size),
+            crate::util::format_bytes(MAX_MESSAGE_SIZE)
         );
     }
 

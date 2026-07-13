@@ -1,65 +1,64 @@
-//! PIN generation, PIN hints, and PIN-derived keys for secure-send-web's
+//! Rotating short PIN and PIN-root key derivation for secure-send-web's
 //! Nostr "Auto Exchange" mode.
+//!
+//! The PIN is 10 Crockford-base32 characters (9 data + 1 checksum), displayed
+//! as `XXXXX-XXXXX`. The sender mints a fresh PIN every [`PIN_ROTATION_MS`]
+//! and honors the [`PIN_ACTIVE_GENERATIONS`] most recent ones, so any single
+//! PIN is valid for at most [`PIN_TTL_MS`].
+//!
+//! Every PIN-scoped value is an HKDF derivation off a single PBKDF2-SHA-256
+//! stretch of the PIN (the "PIN root"), domain-separated by info label:
+//! `hint:<bucket>` (rendezvous event lookup tag), `auth` (claim/confirm
+//! sealing key), `rendezvous` (rendezvous payload key), and `fingerprint`
+//! (local-only visual check). The PIN derives no content-encryption keys —
+//! those come from the ephemeral ECDH exchange the PIN authenticates (see
+//! [`crate::crypto::ecdh`]). Mirrors secure-send-web's `src/lib/crypto/pin.ts`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+use hkdf::Hkdf;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 
 use super::aes::AES_KEY_LEN;
 use super::chunk::fill_random;
 
-pub const PIN_LENGTH: usize = 12;
+/// Total PIN length, including the trailing checksum character.
+pub const PIN_LENGTH: usize = 10;
 const PIN_CHECKSUM_LENGTH: usize = 1;
-const PIN_CHARSET: &[u8] =
-    b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789-/:;()$&@?!.,\"";
+/// Display/entry grouping: `XXXXX-XXXXX`.
+const PIN_GROUP_LENGTH: usize = 5;
+
+/// Crockford base32 alphabet: digits + uppercase letters, excluding I, L, O
+/// (mapped from look-alikes on input: I/L -> 1, O -> 0) and U. Matches
+/// secure-send-web's `PIN_CHARSET`.
+const PIN_CHARSET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// How often the sender mints and publishes a fresh PIN.
+pub const PIN_ROTATION_MS: u64 = 120_000;
+/// How many recent PIN generations the sender honors when verifying a claim.
+pub const PIN_ACTIVE_GENERATIONS: usize = 3;
+/// Resulting validity of any single PIN: bounds rendezvous-event freshness on
+/// the receiver and is the NIP-40 expiration the sender attaches.
+pub const PIN_TTL_MS: u64 = PIN_ROTATION_MS * PIN_ACTIVE_GENERATIONS as u64;
+/// How many earlier rotation buckets the receiver derives hints for. An event
+/// of age exactly PIN_TTL_MS can sit PIN_ACTIVE_GENERATIONS buckets back, so
+/// the look-back must equal PIN_ACTIVE_GENERATIONS to cover the whole
+/// non-expired window.
+pub const PIN_HINT_LOOKBACK_BUCKETS: u64 = PIN_ACTIVE_GENERATIONS as u64;
+
 const PBKDF2_ITERATIONS: u32 = 600_000;
-const SALT_LENGTH: usize = 16;
+/// Domain-separation salt for the PBKDF2 PIN-root derivation (public).
+const PIN_ROOT_SALT: &str = "secure-send:pin-root:v2";
+/// HKDF salt shared by every derivation off the PIN root; each purpose is
+/// domain-separated by its HKDF info label.
+const PIN_HKDF_SALT: &str = "secure-send:pin:v2";
+
+/// PIN hint length in hex characters (64 bits): the Nostr `#h` filter tag.
 const PIN_HINT_LENGTH: usize = 16;
-const PIN_HINT_BUCKET_SEC: u64 = 3600;
-const PIN_HINT_SALT: &str = "secure-send:pin-hint:v1";
-const PIN_KEY_LABEL_CONTEXT: &str = "secure-send:pin-key:v1";
-
-// Local-only PIN fingerprint. Displayed to both sides so two humans can visually
-// confirm on-device that they entered the same PIN. It never crosses the network,
-// so it uses a lighter work factor than the wire hint and a distinct, time-independent
-// salt so both sides always derive the same value. Mirrors secure-send-web's
-// computePinFingerprint (see src/lib/crypto/pin.ts).
-const PIN_FINGERPRINT_LENGTH: usize = 8; // uppercase base32 characters
-const PIN_FINGERPRINT_SALT: &str = "secure-send:pin-fingerprint:v1";
-const PIN_FINGERPRINT_ITERATIONS: u32 = 200_000;
-
-pub const TRANSFER_EXPIRATION_MS: u64 = 60 * 60 * 1000;
-
-#[derive(Debug, Clone)]
-pub struct NostrTransferKeys {
-    pub metadata: [u8; AES_KEY_LEN],
-    pub signals: [u8; AES_KEY_LEN],
-    pub p2p_content: [u8; AES_KEY_LEN],
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PinKeyLabel {
-    Metadata,
-    Signals,
-    P2pContent,
-}
-
-impl PinKeyLabel {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Metadata => "metadata",
-            Self::Signals => "signals",
-            Self::P2pContent => "p2p-content",
-        }
-    }
-}
-
-/// Whether `c` may appear in a PIN (used to filter interactive input).
-pub fn is_pin_char(c: char) -> bool {
-    c.is_ascii() && PIN_CHARSET.contains(&(c as u8))
-}
+/// PIN fingerprint length in uppercase base32 characters (40 bits, local-only).
+const PIN_FINGERPRINT_LENGTH: usize = 8;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -72,26 +71,29 @@ pub fn now_sec() -> u64 {
     now_ms() / 1000
 }
 
-pub fn is_expired(created_at_ms: u64) -> bool {
-    now_ms().saturating_sub(created_at_ms) > TRANSFER_EXPIRATION_MS
-}
-
+/// Compute the checksum character using a position-weighted sum.
+///
+/// Weights are the odd numbers 1, 3, 5, ... — every weight is coprime with the
+/// charset size (32), so any single-character substitution always changes the
+/// checksum. Mirrors secure-send-web's `computeChecksum`.
 fn compute_checksum(data: &[u8]) -> u8 {
     let mut sum = 0usize;
     for (i, byte) in data.iter().enumerate() {
         let Some(index) = PIN_CHARSET.iter().position(|c| c == byte) else {
             return PIN_CHARSET[0];
         };
-        sum += index * (i + 1);
+        sum += index * (2 * i + 1);
     }
     PIN_CHARSET[sum % PIN_CHARSET.len()]
 }
 
+/// Generate a random PIN: 9 data characters drawn with rejection sampling
+/// (no modulo bias) plus the checksum character.
 pub fn generate_pin() -> Result<String> {
     let data_len = PIN_LENGTH - PIN_CHECKSUM_LENGTH;
     let charset_len = PIN_CHARSET.len();
     let max_multiple = (256 / charset_len) * charset_len;
-    let mut data = Vec::with_capacity(data_len);
+    let mut data = Vec::with_capacity(PIN_LENGTH);
     let mut buf = vec![0u8; data_len * 2];
 
     while data.len() < data_len {
@@ -111,6 +113,50 @@ pub fn generate_pin() -> Result<String> {
     String::from_utf8(data).map_err(|e| anyhow::anyhow!("generated invalid PIN: {e}"))
 }
 
+/// Canonicalize typed PIN characters: uppercase and map the Crockford base32
+/// look-alikes (O -> 0, I/L -> 1). Separators (whitespace, dashes) are
+/// dropped. Characters outside the PIN charset are preserved so callers can
+/// detect and surface invalid input. Mirrors secure-send-web's
+/// `normalizePinInput`.
+pub fn normalize_pin_input(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .filter_map(normalize_pin_char)
+        .collect()
+}
+
+/// Canonical form of one typed PIN character, or `None` only for characters
+/// that cannot be represented (non-ASCII).
+fn normalize_pin_char(c: char) -> Option<char> {
+    if !c.is_ascii() {
+        return None;
+    }
+    Some(match c.to_ascii_uppercase() {
+        'O' => '0',
+        'I' | 'L' => '1',
+        upper => upper,
+    })
+}
+
+/// Canonicalize one typed character for interactive PIN entry: returns the
+/// canonical charset character, or `None` for anything that can never be part
+/// of a PIN (including separators, which the TUI simply ignores).
+pub fn canonical_pin_char(c: char) -> Option<char> {
+    let canonical = normalize_pin_char(c)?;
+    PIN_CHARSET.contains(&(canonical as u8)).then_some(canonical)
+}
+
+/// Format a PIN for display as symmetric groups (`XXXXX-XXXXX`). Also groups
+/// partial input, for live entry display.
+pub fn format_pin(pin: &str) -> String {
+    pin.as_bytes()
+        .chunks(PIN_GROUP_LENGTH)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Validate PIN format and checksum (expects normalized input).
 pub fn is_valid_pin(pin: &str) -> bool {
     let bytes = pin.as_bytes();
     if bytes.len() != PIN_LENGTH {
@@ -124,50 +170,97 @@ pub fn is_valid_pin(pin: &str) -> bool {
     compute_checksum(data) == bytes[PIN_LENGTH - PIN_CHECKSUM_LENGTH]
 }
 
-pub fn generate_salt() -> Result<[u8; SALT_LENGTH]> {
-    let mut salt = [0u8; SALT_LENGTH];
-    fill_random(&mut salt)?;
-    Ok(salt)
-}
-
 pub fn generate_transfer_id() -> Result<String> {
     let mut bytes = [0u8; 8];
     fill_random(&mut bytes)?;
     Ok(hex_lower(&bytes))
 }
 
-pub fn compute_pin_hint(pin: &str, bucket_offset: u64) -> String {
-    let bucket = now_sec()
-        .checked_div(PIN_HINT_BUCKET_SEC)
-        .unwrap_or_default()
-        .saturating_sub(bucket_offset);
-    let salt = format!("{PIN_HINT_SALT}:{bucket}");
-    let mut out = vec![0u8; PIN_HINT_LENGTH.div_ceil(2)];
-    pbkdf2_hmac::<Sha256>(pin.as_bytes(), salt.as_bytes(), PBKDF2_ITERATIONS, &mut out);
-    hex_lower(&out)[..PIN_HINT_LENGTH].to_string()
-}
-
-/// Compute the local-only PIN fingerprint: a stable, time-independent one-way
-/// derivation of the PIN so two humans can visually confirm they used the same PIN.
+/// The PIN root: the PBKDF2-SHA-256 stretch of the PIN, ready for cheap HKDF
+/// expansions. The expensive stretch runs exactly once per PIN; brute-forcing
+/// any derived value still costs the full PBKDF2 work factor per PIN guess.
 ///
-/// Encoded as `PIN_FINGERPRINT_LENGTH` uppercase base32 chars (RFC 4648, the Tor v3
-/// `.onion` alphabet A–Z2–7) so the human-compared value avoids ambiguous glyphs.
-/// Mirrors secure-send-web's `computePinFingerprint`.
-pub fn compute_pin_fingerprint(pin: &str) -> String {
-    // 5 bits per base32 char; div_ceil covers a non-multiple-of-8 bit width.
-    let byte_count = (PIN_FINGERPRINT_LENGTH * 5).div_ceil(8);
-    let mut out = vec![0u8; byte_count];
-    pbkdf2_hmac::<Sha256>(
-        pin.as_bytes(),
-        PIN_FINGERPRINT_SALT.as_bytes(),
-        PIN_FINGERPRINT_ITERATIONS,
-        &mut out,
-    );
-    base32_upper(&out)[..PIN_FINGERPRINT_LENGTH].to_string()
+/// CPU-bound (~600k PBKDF2 iterations): call [`PinRoot::derive`] from
+/// `spawn_blocking` in async contexts.
+pub struct PinRoot {
+    hkdf: Hkdf<Sha256>,
 }
 
-/// Format a PIN fingerprint for display: uppercased and grouped into 4-char blocks
-/// (e.g. `ABCD-EF01`). Mirrors secure-send-web's `formatPinHint`.
+impl PinRoot {
+    pub fn derive(pin: &str) -> Self {
+        let mut root = [0u8; 32];
+        pbkdf2_hmac::<Sha256>(
+            pin.as_bytes(),
+            PIN_ROOT_SALT.as_bytes(),
+            PBKDF2_ITERATIONS,
+            &mut root,
+        );
+        Self {
+            hkdf: Hkdf::new(Some(PIN_HKDF_SALT.as_bytes()), &root),
+        }
+    }
+
+    fn expand(&self, info: &str, out: &mut [u8]) {
+        self.hkdf
+            .expand(info.as_bytes(), out)
+            .expect("HKDF output length is always valid here");
+    }
+
+    fn aes_key(&self, info: &str) -> [u8; AES_KEY_LEN] {
+        let mut key = [0u8; AES_KEY_LEN];
+        self.expand(info, &mut key);
+        key
+    }
+
+    /// The PIN hint (16 hex chars) for an absolute rotation bucket. Published
+    /// as the Nostr `#h` tag so the receiver can locate the rendezvous event
+    /// without revealing the PIN; bucket scoping keeps the tag from being a
+    /// stable cross-transfer correlator.
+    pub fn hint_for_bucket(&self, bucket: u64) -> String {
+        let mut bytes = [0u8; PIN_HINT_LENGTH / 2];
+        self.expand(&format!("hint:{bucket}"), &mut bytes);
+        hex_lower(&bytes)
+    }
+
+    /// The PIN hint for the rotation bucket `bucket_offset` buckets before the
+    /// current one (0 = current bucket).
+    pub fn hint(&self, bucket_offset: u64) -> String {
+        self.hint_for_bucket(current_rotation_bucket().saturating_sub(bucket_offset))
+    }
+
+    /// The AES-GCM key that seals the claim/confirm handshake payloads. A
+    /// payload that decrypts under this key proves the author knows the PIN.
+    pub fn auth_key(&self) -> [u8; AES_KEY_LEN] {
+        self.aes_key("auth")
+    }
+
+    /// The AES-GCM key for the rendezvous event payload (transfer id, sender
+    /// ECDH public key, handshake nonce, file metadata).
+    pub fn rendezvous_key(&self) -> [u8; AES_KEY_LEN] {
+        self.aes_key("rendezvous")
+    }
+
+    /// The PIN fingerprint: a stable one-way derivation displayed to both
+    /// sides so two humans can visually confirm they entered the same PIN.
+    /// Never published to relays, so it carries no rotation-bucket scoping.
+    ///
+    /// Encoded as 8 uppercase base32 chars (RFC 4648, the Tor v3 `.onion`
+    /// alphabet A–Z2–7) to avoid ambiguous glyphs.
+    pub fn fingerprint(&self) -> String {
+        // 5 bits per base32 char; div_ceil covers a non-multiple-of-8 bit width.
+        let mut bytes = vec![0u8; (PIN_FINGERPRINT_LENGTH * 5).div_ceil(8)];
+        self.expand("fingerprint", &mut bytes);
+        base32_upper(&bytes)[..PIN_FINGERPRINT_LENGTH].to_string()
+    }
+}
+
+/// The current PIN rotation bucket (`floor(now_ms / PIN_ROTATION_MS)`).
+fn current_rotation_bucket() -> u64 {
+    now_ms() / PIN_ROTATION_MS
+}
+
+/// Format a PIN fingerprint for display: grouped into 4-char blocks
+/// (e.g. `ABCD-EF23`). Mirrors secure-send-web's `formatPinHint`.
 pub fn format_pin_fingerprint(fingerprint: &str) -> String {
     let upper = fingerprint.to_uppercase();
     upper
@@ -176,42 +269,6 @@ pub fn format_pin_fingerprint(fingerprint: &str) -> String {
         .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
         .collect::<Vec<_>>()
         .join("-")
-}
-
-pub fn derive_nostr_transfer_keys(pin: &str, salt: &[u8]) -> Result<NostrTransferKeys> {
-    Ok(NostrTransferKeys {
-        metadata: derive_labeled_key(pin, salt, PinKeyLabel::Metadata)?,
-        signals: derive_labeled_key(pin, salt, PinKeyLabel::Signals)?,
-        p2p_content: derive_labeled_key(pin, salt, PinKeyLabel::P2pContent)?,
-    })
-}
-
-fn derive_labeled_key(pin: &str, salt: &[u8], label: PinKeyLabel) -> Result<[u8; AES_KEY_LEN]> {
-    derive_labeled_key_with_iterations(pin, salt, label, PBKDF2_ITERATIONS)
-}
-
-fn derive_labeled_key_with_iterations(
-    pin: &str,
-    salt: &[u8],
-    label: PinKeyLabel,
-    iterations: u32,
-) -> Result<[u8; AES_KEY_LEN]> {
-    if salt.len() < SALT_LENGTH {
-        bail!(
-            "salt too short: expected at least {SALT_LENGTH} bytes, got {}",
-            salt.len()
-        );
-    }
-
-    let label = format!("{PIN_KEY_LABEL_CONTEXT}:{}", label.as_str());
-    let mut labeled_salt = Vec::with_capacity(salt.len() + 1 + label.len());
-    labeled_salt.extend_from_slice(salt);
-    labeled_salt.push(0);
-    labeled_salt.extend_from_slice(label.as_bytes());
-
-    let mut out = [0u8; AES_KEY_LEN];
-    pbkdf2_hmac::<Sha256>(pin.as_bytes(), &labeled_salt, iterations, &mut out);
-    Ok(out)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -224,10 +281,8 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Encode bytes as unpadded uppercase base32 (RFC 4648), 5 bits per output char.
-/// Uses the Tor v3 `.onion` alphabet (A–Z, 2–7), which omits 0/1/8/9 so the encoded
-/// value stays unambiguous when read aloud or copied by hand. Mirrors secure-send-web's
-/// `toBase32`.
+/// Encode bytes as unpadded uppercase base32 (RFC 4648), 5 bits per output
+/// char. Mirrors secure-send-web's `toBase32`.
 fn base32_upper(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut value: u32 = 0;
@@ -256,65 +311,61 @@ mod tests {
         let pin = generate_pin().unwrap();
         assert_eq!(pin.len(), PIN_LENGTH);
         assert!(is_valid_pin(&pin));
+        assert!(pin.bytes().all(|b| PIN_CHARSET.contains(&b)));
     }
 
     #[test]
-    fn checksum_rejects_typo() {
-        let mut pin = generate_pin().unwrap().into_bytes();
-        pin[0] = if pin[0] == b'A' { b'B' } else { b'A' };
-        assert!(!is_valid_pin(std::str::from_utf8(&pin).unwrap()));
+    fn checksum_rejects_typo_and_transposition() {
+        // Fixed vector: checksum of "ABCDE0123" is 'Y' (weights 1,3,5,...),
+        // verified against secure-send-web's computeChecksum.
+        assert!(is_valid_pin("ABCDE0123Y"));
+        assert!(!is_valid_pin("ABCDF0123Y")); // substitution
+        assert!(!is_valid_pin("BACDE0123Y")); // transposition
+        assert!(!is_valid_pin("ABCDE0123")); // too short
     }
 
     #[test]
-    fn fingerprint_is_stable_and_formatted() {
-        let pin = "ABCDEFGHJKL2";
-        let fp = compute_pin_fingerprint(pin);
-        // 8 uppercase base32 chars, deterministic (no time bucket).
-        assert_eq!(fp.len(), PIN_FINGERPRINT_LENGTH);
-        assert_eq!(fp, compute_pin_fingerprint(pin));
-        assert!(fp.chars().all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
-
-        // Parity with secure-send-web's computePinFingerprint (verified against
-        // PBKDF2-SHA256 base32 in both Python and the browser Web Crypto API).
-        assert_eq!(fp, "LKMPVCX2");
-        assert_eq!(format_pin_fingerprint(&fp), "LKMP-VCX2");
-        assert_ne!(compute_pin_fingerprint(pin), compute_pin_fingerprint("MNPQRSTUVWX3"));
+    fn input_normalization_maps_lookalikes() {
+        assert_eq!(normalize_pin_input(" abcde-0123y "), "ABCDE0123Y");
+        assert_eq!(normalize_pin_input("oO-iI-lL"), "001111");
+        // Invalid characters are preserved so validation can reject them.
+        assert_eq!(normalize_pin_input("AB*U"), "AB*U");
     }
 
     #[test]
-    fn labels_are_domain_separated() {
-        let pin = "ABCDEFGHJKL2";
-        let salt = [7u8; SALT_LENGTH];
-        let keys = derive_test_transfer_keys(pin, &salt).unwrap();
-        assert_ne!(keys.metadata, keys.signals);
-        assert_ne!(keys.signals, keys.p2p_content);
+    fn canonical_char_accepts_only_charset() {
+        assert_eq!(canonical_pin_char('a'), Some('A'));
+        assert_eq!(canonical_pin_char('o'), Some('0'));
+        assert_eq!(canonical_pin_char('L'), Some('1'));
+        assert_eq!(canonical_pin_char('7'), Some('7'));
+        assert_eq!(canonical_pin_char('U'), None);
+        assert_eq!(canonical_pin_char('-'), None);
+        assert_eq!(canonical_pin_char('*'), None);
     }
 
-    fn derive_test_transfer_keys(pin: &str, salt: &[u8]) -> Result<NostrTransferKeys> {
-        #[cfg(debug_assertions)]
-        const TEST_PBKDF2_ITERATIONS: u32 = 1;
-        #[cfg(not(debug_assertions))]
-        const TEST_PBKDF2_ITERATIONS: u32 = PBKDF2_ITERATIONS;
+    #[test]
+    fn pin_formats_in_groups_of_five() {
+        assert_eq!(format_pin("ABCDE0123Y"), "ABCDE-0123Y");
+        assert_eq!(format_pin("ABCDE01"), "ABCDE-01");
+    }
 
-        Ok(NostrTransferKeys {
-            metadata: derive_labeled_key_with_iterations(
-                pin,
-                salt,
-                PinKeyLabel::Metadata,
-                TEST_PBKDF2_ITERATIONS,
-            )?,
-            signals: derive_labeled_key_with_iterations(
-                pin,
-                salt,
-                PinKeyLabel::Signals,
-                TEST_PBKDF2_ITERATIONS,
-            )?,
-            p2p_content: derive_labeled_key_with_iterations(
-                pin,
-                salt,
-                PinKeyLabel::P2pContent,
-                TEST_PBKDF2_ITERATIONS,
-            )?,
-        })
+    #[test]
+    fn pin_root_matches_web_vectors() {
+        // Parity with secure-send-web's importPinRoot + HKDF derivations,
+        // verified against the Web Crypto API (PBKDF2-SHA-256, 600k
+        // iterations, salt "secure-send:pin-root:v2"; HKDF-SHA-256, salt
+        // "secure-send:pin:v2").
+        let root = PinRoot::derive("ABCDE0123Y");
+        assert_eq!(root.hint_for_bucket(14778858), "182f809c22f137e7");
+        assert_eq!(
+            hex_lower(&root.auth_key()),
+            "2e05996ba3836f437372d98955398142ef9e1f2c477fb999ca8e93718c3970a5"
+        );
+        assert_eq!(
+            hex_lower(&root.rendezvous_key()),
+            "7f9f1f01b4db42c33120fc470ecc77100ce6015bcfa6aac7cc4abd346769d2f9"
+        );
+        assert_eq!(root.fingerprint(), "N62NQZE5");
+        assert_eq!(format_pin_fingerprint(&root.fingerprint()), "N62N-QZE5");
     }
 }

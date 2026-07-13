@@ -1,4 +1,16 @@
 //! Nostr signaling compatible with secure-send-web's Auto Exchange mode.
+//!
+//! Three event shapes, mirroring `src/lib/nostr/events.ts`:
+//!
+//! - **Rendezvous** (kind 24243, `type=rendezvous`): published by the sender
+//!   once per PIN rotation, tagged with the rotation-bucket-scoped PIN hint
+//!   (`#h`). The payload is sealed with the PIN-derived rendezvous key.
+//! - **Handshake** (kind 24242, `type=claim|confirm`): the receiver claims the
+//!   transfer, the sender confirms. Payloads are sealed with the PIN-derived
+//!   auth key; the echoed nonces and ECDH public keys bind the handshake to
+//!   one rotation generation and rule out relay man-in-the-middle key swaps.
+//! - **Signal** (kind 24242, `type=signal`): WebRTC offer/answer/candidates,
+//!   sealed with the ECDH-derived session signaling key.
 
 use std::time::Duration;
 
@@ -9,7 +21,8 @@ use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::aes;
-use crate::crypto::pin::{NostrTransferKeys, TRANSFER_EXPIRATION_MS, now_sec};
+use crate::crypto::chunk::fill_random;
+use crate::crypto::pin::{PIN_TTL_MS, now_sec};
 
 pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
@@ -21,32 +34,95 @@ pub const DEFAULT_RELAYS: &[&str] = &[
 ];
 
 const EVENT_KIND_DATA_TRANSFER: u16 = 24242;
-const EVENT_KIND_PIN_EXCHANGE: u16 = 24243;
+const EVENT_KIND_RENDEZVOUS: u16 = 24243;
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const PUBLISH_RETRIES: usize = 3;
 
+/// Rendezvous payload, sealed with the PIN-derived rendezvous key inside the
+/// kind-24243 event. Republished with a fresh PIN, hint, and nonce on every
+/// rotation; `transfer_id`, `sender_pubkey`, and `ecdh_public_key` stay stable
+/// for the transfer's lifetime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PinExchangePayload {
+pub struct RendezvousPayload {
+    /// Always `"rendezvous"`.
+    #[serde(rename = "type")]
+    pub payload_type: String,
     pub content_type: String,
     pub transfer_id: String,
+    /// Nostr pubkey of the sender; must equal the rendezvous event author.
     pub sender_pubkey: String,
-    pub relays: Vec<String>,
-    pub file_name: String,
-    pub file_size: u64,
-    pub mime_type: String,
+    /// Sender's ephemeral ECDH public key (base64, 65-byte uncompressed P-256).
+    pub ecdh_public_key: String,
+    /// Sender handshake nonce (base64), fresh per rotation; echoed in the claim.
+    pub nonce: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relays: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct PinExchangeEvent {
-    pub payload: PinExchangePayload,
-    pub salt: Vec<u8>,
+/// Claim payload (receiver -> sender), sealed with the PIN-derived auth key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimPayload {
+    /// Always `"claim"`.
+    #[serde(rename = "type")]
+    pub payload_type: String,
     pub transfer_id: String,
-    pub sender_pubkey: PublicKey,
-    pub matched_hint: String,
-    pub created_at_ms: u64,
-    pub keys: NostrTransferKeys,
+    /// Echo of the rendezvous nonce for the PIN generation the receiver used.
+    pub sender_nonce: String,
+    /// Fresh receiver handshake nonce (base64); echoed back in the confirm.
+    pub receiver_nonce: String,
+    /// Receiver's ephemeral ECDH public key (base64, 65-byte uncompressed P-256).
+    pub receiver_ecdh_public_key: String,
+    /// Echo of the sender's ECDH public key the receiver will run ECDH against.
+    pub sender_ecdh_public_key: String,
+}
+
+/// Confirm payload (sender -> receiver), sealed with the same PIN-derived auth
+/// key that verified the claim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmPayload {
+    /// Always `"confirm"`.
+    #[serde(rename = "type")]
+    pub payload_type: String,
+    pub transfer_id: String,
+    pub sender_nonce: String,
+    pub receiver_nonce: String,
+    /// Echo of the receiver ECDH public key the sender locked the transfer to.
+    pub receiver_ecdh_public_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeType {
+    Claim,
+    Confirm,
+}
+
+impl HandshakeType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::Confirm => "confirm",
+        }
+    }
+}
+
+/// A parsed (but not yet opened) handshake event.
+#[derive(Debug, Clone)]
+pub struct ParsedHandshakeEvent {
+    pub event_id: EventId,
+    pub author: PublicKey,
+    pub handshake_type: HandshakeType,
+    pub transfer_id: String,
+    pub sealed_payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,20 +154,6 @@ struct SignalEnvelope {
     #[serde(rename = "type")]
     payload_type: String,
     signal: Signal,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AckBody {
-    #[serde(rename = "type")]
-    payload_type: String,
-    transfer_id: String,
-    seq: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct AckEvent {
-    pub receiver_pubkey: PublicKey,
 }
 
 #[derive(Debug, Clone)]
@@ -221,37 +283,53 @@ pub fn data_kind() -> Kind {
     Kind::from_u16(EVENT_KIND_DATA_TRANSFER)
 }
 
-pub fn pin_exchange_kind() -> Kind {
-    Kind::from_u16(EVENT_KIND_PIN_EXCHANGE)
+pub fn rendezvous_kind() -> Kind {
+    Kind::from_u16(EVENT_KIND_RENDEZVOUS)
 }
 
 pub fn default_relays_vec() -> Vec<String> {
     DEFAULT_RELAYS.iter().map(|relay| (*relay).to_string()).collect()
 }
 
-pub fn create_pin_exchange_event(
+/// Generate a random handshake nonce (16 bytes, base64). The sender mints one
+/// per rendezvous publication; the receiver mints one per claim. Echoing them
+/// inside the sealed claim/confirm payloads prevents replay across rotations,
+/// transfers, and handshake directions.
+pub fn generate_handshake_nonce() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    fill_random(&mut bytes)?;
+    Ok(STANDARD.encode(bytes))
+}
+
+/// Create a rendezvous event (kind 24243).
+///
+/// The NIP-40 `expiration` tag is set `PIN_TTL_MS` ahead: a rendezvous event
+/// is only claimable while its PIN generation is still honored by the sender,
+/// so relays are asked to drop it as soon as that window closes.
+pub fn create_rendezvous_event(
     client: &NostrClient,
     encrypted_payload: &[u8],
     salt: &[u8],
     transfer_id: &str,
     hint: &str,
 ) -> Result<Event> {
-    let expiration = now_sec() + (TRANSFER_EXPIRATION_MS / 1000);
+    let expiration = now_sec() + PIN_TTL_MS / 1000;
     let tags = vec![
         tag("h", hint)?,
         tag("s", STANDARD.encode(salt))?,
         tag("t", transfer_id)?,
-        tag("type", "pin_exchange")?,
+        tag("type", "rendezvous")?,
         tag("expiration", expiration.to_string())?,
     ];
 
     client.sign(
-        EventBuilder::new(pin_exchange_kind(), STANDARD.encode(encrypted_payload)).tags(tags),
+        EventBuilder::new(rendezvous_kind(), STANDARD.encode(encrypted_payload)).tags(tags),
     )
 }
 
-pub fn parse_pin_exchange_event(event: &Event) -> Option<(String, Vec<u8>, String, Vec<u8>)> {
-    if event.kind != pin_exchange_kind() {
+/// Parse a rendezvous event into `(hint, salt, transfer_id, encrypted_payload)`.
+pub fn parse_rendezvous_event(event: &Event) -> Option<(String, Vec<u8>, String, Vec<u8>)> {
+    if event.kind != rendezvous_kind() {
         return None;
     }
 
@@ -262,63 +340,64 @@ pub fn parse_pin_exchange_event(event: &Event) -> Option<(String, Vec<u8>, Strin
     Some((hint, salt, transfer_id, encrypted_payload))
 }
 
-pub fn create_authenticated_ack_event(
-    client: &NostrClient,
-    sender_pubkey: &PublicKey,
-    transfer_id: &str,
-    seq: i64,
-    key: &[u8; aes::AES_KEY_LEN],
-    hint: Option<&str>,
-) -> Result<Event> {
-    let body = AckBody {
-        payload_type: "ack".to_string(),
-        transfer_id: transfer_id.to_string(),
-        seq,
-    };
-    let encrypted = aes::encrypt(key, &serde_json::to_vec(&body)?)?;
-
-    let mut tags = vec![
-        tag("p", sender_pubkey.to_hex())?,
-        tag("t", transfer_id)?,
-        tag("seq", seq.to_string())?,
-        tag("type", "ack")?,
-    ];
-    if let Some(hint) = hint {
-        tags.push(tag("h", hint)?);
-    }
-
-    client.sign(EventBuilder::new(data_kind(), STANDARD.encode(encrypted)).tags(tags))
+/// Seal a handshake payload (claim/confirm) with the PIN-derived auth key.
+/// AES-GCM's authentication tag is what makes a wrong-PIN proof unverifiable.
+pub fn seal_handshake_payload<T: Serialize>(
+    auth_key: &[u8; aes::AES_KEY_LEN],
+    payload: &T,
+) -> Result<Vec<u8>> {
+    aes::encrypt(auth_key, &serde_json::to_vec(payload)?)
 }
 
-pub fn parse_ack_event(
-    event: &Event,
-    key: &[u8; aes::AES_KEY_LEN],
-    expected_transfer_id: &str,
-    expected_seq: i64,
-) -> Option<AckEvent> {
-    if event.kind != data_kind() || tag_value(event, "type")? != "ack" {
-        return None;
-    }
-    if tag_value(event, "t")? != expected_transfer_id {
-        return None;
-    }
-    let seq = tag_value(event, "seq")?.parse::<i64>().ok()?;
-    if seq != expected_seq {
-        return None;
-    }
+/// Open a sealed handshake payload. Fails if the payload was not sealed with
+/// this auth key (i.e. the author used a different PIN) or is not valid JSON.
+/// Field validation is the caller's job.
+pub fn open_handshake_payload<T: for<'de> Deserialize<'de>>(
+    auth_key: &[u8; aes::AES_KEY_LEN],
+    sealed_payload: &[u8],
+) -> Result<T> {
+    let decrypted = aes::decrypt(auth_key, sealed_payload)?;
+    serde_json::from_slice(&decrypted).context("invalid handshake payload JSON")
+}
 
-    let encrypted = STANDARD.decode(&event.content).ok()?;
-    let decrypted = aes::decrypt(key, &encrypted).ok()?;
-    let body: AckBody = serde_json::from_slice(&decrypted).ok()?;
-    if body.payload_type != "ack"
-        || body.transfer_id != expected_transfer_id
-        || body.seq != expected_seq
-    {
+/// Create a handshake event (kind 24242, `type=claim|confirm`).
+///
+/// Tags stay plaintext so relays can route by transfer and recipient, but they
+/// carry no authority: the sealed body must decrypt under the PIN-derived auth
+/// key and repeat the transfer/nonces before either side acts on it.
+pub fn create_handshake_event(
+    client: &NostrClient,
+    recipient_pubkey: &PublicKey,
+    transfer_id: &str,
+    handshake_type: HandshakeType,
+    sealed_payload: &[u8],
+) -> Result<Event> {
+    let tags = vec![
+        tag("p", recipient_pubkey.to_hex())?,
+        tag("t", transfer_id)?,
+        tag("type", handshake_type.as_str())?,
+    ];
+
+    client.sign(EventBuilder::new(data_kind(), STANDARD.encode(sealed_payload)).tags(tags))
+}
+
+/// Parse a handshake event (claim or confirm).
+pub fn parse_handshake_event(event: &Event) -> Option<ParsedHandshakeEvent> {
+    if event.kind != data_kind() {
         return None;
     }
+    let handshake_type = match tag_value(event, "type")? {
+        "claim" => HandshakeType::Claim,
+        "confirm" => HandshakeType::Confirm,
+        _ => return None,
+    };
 
-    Some(AckEvent {
-        receiver_pubkey: event.pubkey,
+    Some(ParsedHandshakeEvent {
+        event_id: event.id,
+        author: event.pubkey,
+        handshake_type,
+        transfer_id: tag_value(event, "t")?.to_string(),
+        sealed_payload: STANDARD.decode(&event.content).ok()?,
     })
 }
 
@@ -373,35 +452,35 @@ pub fn parse_signal_event(
     })
 }
 
-pub fn ack_filter(transfer_id: &str, sender_pubkey: &PublicKey) -> Filter {
+/// Rendezvous lookup: kind 24243 events carrying any of the receiver's
+/// derived PIN hints.
+pub fn rendezvous_filter(hints: &[String]) -> Filter {
     Filter::new()
-        .kind(data_kind())
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::T), transfer_id)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), sender_pubkey.to_hex())
-}
-
-pub fn pin_exchange_filter(hints: &[String]) -> Filter {
-    Filter::new()
-        .kind(pin_exchange_kind())
+        .kind(rendezvous_kind())
         .custom_tags(SingleLetterTag::lowercase(Alphabet::H), hints.iter().cloned())
         .limit(10)
 }
 
-pub fn signal_filter(transfer_id: &str, sender_pubkey: &PublicKey) -> Filter {
+/// Kind-24242 events addressed to `recipient` for this transfer. The sender
+/// uses it for incoming claims (and later, receiver signals); the receiver
+/// narrows it by author for the sender's confirm.
+pub fn addressed_filter(transfer_id: &str, recipient: &PublicKey) -> Filter {
     Filter::new()
         .kind(data_kind())
         .custom_tag(SingleLetterTag::lowercase(Alphabet::T), transfer_id)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), sender_pubkey.to_hex())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), recipient.to_hex())
 }
 
-pub fn signal_filter_from_author(
+pub fn addressed_filter_from_author(
     transfer_id: &str,
-    sender_pubkey: &PublicKey,
+    recipient: &PublicKey,
     author: PublicKey,
 ) -> Filter {
-    signal_filter(transfer_id, sender_pubkey).author(author)
+    addressed_filter(transfer_id, recipient).author(author)
 }
 
+/// Kind-24242 events authored by the sender for this transfer, regardless of
+/// `#p` tag — matches the shape secure-send-web's receiver subscribes with.
 pub fn signal_filter_from_sender(transfer_id: &str, sender_pubkey: PublicKey) -> Filter {
     Filter::new()
         .kind(data_kind())
@@ -425,13 +504,20 @@ fn tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
 
+    fn test_client() -> (NostrClient, Keys) {
+        let keys = Keys::generate();
+        (
+            NostrClient {
+                client: Client::new(keys.clone()),
+                keys: keys.clone(),
+            },
+            keys,
+        )
+    }
+
     #[test]
     fn signal_event_preserves_sender_self_p_tag() {
-        let keys = Keys::generate();
-        let client = NostrClient {
-            client: Client::new(keys.clone()),
-            keys: keys.clone(),
-        };
+        let (client, keys) = test_client();
         let key = [7_u8; aes::AES_KEY_LEN];
         let event = create_signal_event(
             &client,
@@ -459,5 +545,97 @@ mod tests {
         assert_eq!(value["#t"], serde_json::json!(["transfer-id"]));
         assert_eq!(value["authors"], serde_json::json!([sender.to_hex()]));
         assert!(value.get("#p").is_none());
+    }
+
+    #[test]
+    fn rendezvous_event_round_trips_and_matches_web_shape() {
+        let (client, _) = test_client();
+        let salt = [9u8; 16];
+        let event =
+            create_rendezvous_event(&client, b"sealed", &salt, "transfer-id", "aabbccdd")
+                .expect("rendezvous event");
+
+        assert_eq!(event.kind.as_u16(), EVENT_KIND_RENDEZVOUS);
+        assert_eq!(tag_value(&event, "type"), Some("rendezvous"));
+        let expiration: u64 = tag_value(&event, "expiration").unwrap().parse().unwrap();
+        let expected = now_sec() + PIN_TTL_MS / 1000;
+        assert!(expiration.abs_diff(expected) <= 2);
+
+        let (hint, parsed_salt, transfer_id, sealed) =
+            parse_rendezvous_event(&event).expect("parses");
+        assert_eq!(hint, "aabbccdd");
+        assert_eq!(parsed_salt, salt);
+        assert_eq!(transfer_id, "transfer-id");
+        assert_eq!(sealed, b"sealed");
+    }
+
+    #[test]
+    fn handshake_payloads_round_trip_with_camel_case() {
+        let key = [3u8; aes::AES_KEY_LEN];
+        let claim = ClaimPayload {
+            payload_type: "claim".to_string(),
+            transfer_id: "tid".to_string(),
+            sender_nonce: "sn".to_string(),
+            receiver_nonce: "rn".to_string(),
+            receiver_ecdh_public_key: "rk".to_string(),
+            sender_ecdh_public_key: "sk".to_string(),
+        };
+        let sealed = seal_handshake_payload(&key, &claim).unwrap();
+        let opened: ClaimPayload = open_handshake_payload(&key, &sealed).unwrap();
+        assert_eq!(opened.sender_nonce, "sn");
+
+        // Wire JSON uses secure-send-web's camelCase field names.
+        let json = serde_json::to_value(&claim).unwrap();
+        assert_eq!(json["type"], "claim");
+        assert!(json.get("senderEcdhPublicKey").is_some());
+        assert!(json.get("receiverNonce").is_some());
+
+        // Wrong key must fail to open.
+        let wrong = [4u8; aes::AES_KEY_LEN];
+        assert!(open_handshake_payload::<ClaimPayload>(&wrong, &sealed).is_err());
+    }
+
+    #[test]
+    fn handshake_event_round_trips() {
+        let (client, _) = test_client();
+        let recipient = Keys::generate().public_key();
+        let event = create_handshake_event(
+            &client,
+            &recipient,
+            "transfer-id",
+            HandshakeType::Claim,
+            b"sealed",
+        )
+        .expect("handshake event");
+
+        assert_eq!(event.kind.as_u16(), EVENT_KIND_DATA_TRANSFER);
+        assert_eq!(tag_value(&event, "type"), Some("claim"));
+        assert_eq!(tag_value(&event, "p"), Some(recipient.to_hex().as_str()));
+
+        let parsed = parse_handshake_event(&event).expect("parses");
+        assert_eq!(parsed.handshake_type, HandshakeType::Claim);
+        assert_eq!(parsed.transfer_id, "transfer-id");
+        assert_eq!(parsed.sealed_payload, b"sealed");
+    }
+
+    #[test]
+    fn rendezvous_payload_serializes_like_web() {
+        let payload = RendezvousPayload {
+            payload_type: "rendezvous".to_string(),
+            content_type: "file".to_string(),
+            transfer_id: "tid".to_string(),
+            sender_pubkey: "pk".to_string(),
+            ecdh_public_key: "ek".to_string(),
+            nonce: "n".to_string(),
+            relays: Some(vec!["wss://r".to_string()]),
+            file_name: Some("a.txt".to_string()),
+            file_size: Some(42),
+            mime_type: Some("text/plain".to_string()),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["type"], "rendezvous");
+        assert_eq!(json["contentType"], "file");
+        assert_eq!(json["ecdhPublicKey"], "ek");
+        assert_eq!(json["fileSize"], 42);
     }
 }

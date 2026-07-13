@@ -25,8 +25,10 @@ pub const TAG_LEN: usize = 16;
 pub const CHUNK_INDEX_SIZE: usize = 2;
 /// Per-chunk wire overhead: index + nonce + tag (`ENCRYPTED_CHUNK_OVERHEAD` = 30).
 pub const OVERHEAD_PER_CHUNK: usize = CHUNK_INDEX_SIZE + NONCE_LEN + TAG_LEN;
-/// Maximum transfer size (`MAX_MESSAGE_SIZE` = 100 MiB).
-pub const MAX_MESSAGE_SIZE: u64 = 100 * 1024 * 1024;
+/// Maximum transfer size (`MAX_MESSAGE_SIZE` = 2 GiB). Both sides stream
+/// chunk by chunk (the CLI to/from disk), so the bound comes from the wire
+/// protocol's 2-byte chunk-index range, not RAM.
+pub const MAX_MESSAGE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Fill `buf` with cryptographically secure random bytes from the OS.
 pub(crate) fn fill_random(buf: &mut [u8]) -> Result<()> {

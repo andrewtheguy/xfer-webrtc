@@ -12,18 +12,24 @@ formats as `secure-send-web`. Running the binary with no arguments launches a
 full-screen TUI wizard that walks through the whole transfer: send or receive,
 file/folder selection, signaling mode, output directory, and PIN entry.
 
-- Nostr PIN signaling by default, compatible with the web app's Auto Exchange mode.
+- Nostr PIN signaling by default, compatible with the web app's Auto Exchange
+  mode: a short rotating PIN (fresh every 2 minutes; the sender can also mint
+  a new one on demand with `r`) authenticates an ephemeral ECDH exchange that
+  derives the actual signaling and content keys.
 - Manual SS03 copy/paste signaling, compatible with the web app's manual
   exchange codes. When chosen in the wizard, the TUI exits back to the normal
   terminal so the offer/response codes can be copy/pasted.
 - Multiple files and folders are bundled into a single ZIP before transfer,
-  exactly like the web app (`<folder>.zip` for one folder, `files.zip`
-  otherwise). Received ZIPs are saved as-is; extraction is up to you.
+  exactly like the web app (`<folder>_<timestamp>.zip` for one folder,
+  `files_<timestamp>.zip` otherwise). Received ZIPs are saved as-is;
+  extraction is up to you.
 - WebRTC data-channel transfer using the web app's encrypted chunk protocol.
-- No QR code support and no word-based PIN entry in the CLI.
+  Transport is direct-only (STUN, no TURN relay): the transfer fails rather
+  than route file bytes through a relay server.
+- No QR code support in the CLI.
 
 The file bytes flow over the WebRTC data channel. Nostr relays carry only
-encrypted metadata and WebRTC signaling events.
+encrypted handshake metadata and WebRTC signaling events.
 
 ## Install
 
@@ -104,9 +110,12 @@ secure-send-cli test send /path/to/file more-files a-folder
 secure-send-cli test receive <PIN> --output /path/to/dir
 ```
 
-The sender prints a 12-character PIN on stdout. Multiple paths or a folder are
-sent as one ZIP. If the destination file already exists the receiver fails;
-pass `--overwrite` to replace it.
+The sender prints a 10-character PIN (`XXXXX-XXXXX`) on stdout, and prints a
+fresh one each time it rotates (every 2 minutes) until a receiver claims the
+transfer; enter the code currently shown. PIN entry is forgiving: lowercase is
+accepted, and the look-alikes `O`/`I`/`L` map to `0`/`1`/`1`. Multiple paths
+or a folder are sent as one ZIP. If the destination file already exists the
+receiver fails; pass `--overwrite` to replace it.
 
 Manual SS03 mode:
 
@@ -122,22 +131,31 @@ receiver takes the offer code as an argument and prints a response code.
 
 The CLI follows `secure-send-web` as the source of truth:
 
-- PIN metadata event: Nostr kind `24243`.
-- ACK and WebRTC signal events: Nostr kind `24242`.
+- Rendezvous event: Nostr kind `24243`, tagged with a rotation-bucket-scoped
+  PIN hint and a NIP-40 expiration; payload sealed with the PIN-derived
+  rendezvous key.
+- Claim/confirm handshake and WebRTC signal events: Nostr kind `24242`.
 - Default relays match `secure-send-web`.
-- PIN-derived keys use PBKDF2-SHA256 with the same labels for metadata, signals,
-  and P2P content.
+- The PIN root is PBKDF2-SHA256 (600k iterations, salt
+  `secure-send:pin-root:v2`); hints, the handshake auth key, the rendezvous
+  key, and the on-screen fingerprint are HKDF expansions off that root. The
+  PIN derives no content keys — signaling and content keys come from an
+  ephemeral P-256 ECDH exchange authenticated by the claim/confirm handshake.
+- PIN rotation: fresh PIN every 2 minutes, the 3 most recent generations are
+  honored, so any single PIN lives at most 6 minutes. The sender waits up to
+  30 minutes for a receiver before giving up.
 - Manual signaling uses SS03 payloads.
 - File chunks use AES-256-GCM with the 2-byte chunk index as AAD, followed by
   `DONE:<count>` and receiver `ACK`.
 
 ## Limits
 
-- Maximum transfer size is 100 MiB (after ZIP bundling), matching `secure-send-web`.
+- Maximum transfer size is 2 GiB (after ZIP bundling), matching `secure-send-web`.
 - Received ZIPs are not auto-extracted, matching the web app.
 - No resume support.
-- No QR support and no word-based PIN entry.
+- No QR support.
 - No custom relay/discovery mode.
+- Direct P2P only: no TURN relay fallback for the file bytes.
 
 ## Development
 

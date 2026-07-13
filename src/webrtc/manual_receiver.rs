@@ -52,9 +52,9 @@ pub async fn receive_file_manual(
     }
     if total_bytes > MAX_MESSAGE_SIZE {
         bail!(
-            "Transfer is {:.0} MB, which exceeds the {} MB limit",
-            total_bytes as f64 / 1024.0 / 1024.0,
-            MAX_MESSAGE_SIZE / 1024 / 1024
+            "Transfer is {}, which exceeds the {} limit",
+            crate::util::format_bytes(total_bytes),
+            crate::util::format_bytes(MAX_MESSAGE_SIZE)
         );
     }
 

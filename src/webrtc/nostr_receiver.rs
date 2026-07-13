@@ -1,4 +1,9 @@
 //! Nostr Auto Exchange receiver compatible with secure-send-web.
+//!
+//! Handshake: derive the PIN root, locate the sender's rendezvous event via
+//! rotation-bucket hints, claim the transfer with a payload sealed under the
+//! PIN auth key, wait for the sender's confirm, then derive the ECDH session
+//! keys and receive the file over a direct WebRTC data channel.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -6,43 +11,86 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use nostr_sdk::prelude::*;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::crypto::aes;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
+use crate::crypto::ecdh::{EcdhKeyPair, NostrSessionKeys};
 use crate::crypto::pin::{
-    TRANSFER_EXPIRATION_MS, compute_pin_fingerprint, compute_pin_hint, derive_nostr_transfer_keys,
-    format_pin_fingerprint, is_valid_pin, now_ms,
+    PIN_HINT_LOOKBACK_BUCKETS, PIN_TTL_MS, PinRoot, format_pin_fingerprint, is_valid_pin,
+    normalize_pin_input, now_ms,
 };
 use crate::signaling::nostr::{
-    CandidatePayload, NostrClient, PinExchangeEvent, PinExchangePayload, Signal,
-    create_authenticated_ack_event, create_signal_event, parse_pin_exchange_event,
-    parse_signal_event, pin_exchange_filter, signal_filter_from_sender,
+    CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
+    RendezvousPayload, Signal, addressed_filter_from_author, create_handshake_event,
+    create_signal_event, generate_handshake_nonce, open_handshake_payload,
+    parse_handshake_event, parse_rendezvous_event, parse_signal_event, rendezvous_filter,
+    seal_handshake_payload, signal_filter_from_sender,
 };
 use crate::transfer::run_receiver;
 use crate::ui;
-use crate::util::{OnConflict, resolve_destination};
+use crate::util::{OnConflict, format_bytes, resolve_destination};
 use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
 use crate::webrtc::{add_ice_candidate_safely, advertise_max_message_size, candidate_strings};
 
+/// Time to establish the WebRTC data channel after the handshake completes.
+/// Mirrors the sender's timeout.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time to wait for the sender's confirm after publishing the claim. The
+/// sender confirms immediately upon verifying a claim, so a missing confirm
+/// means the sender is gone or the transfer was claimed by someone else.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+/// Backstop poll for a confirm a relay stored before our subscription landed.
+const CONFIRM_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 const ANSWER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// A decrypted, validated rendezvous event.
+struct RendezvousMatch {
+    payload: RendezvousPayload,
+    salt: Vec<u8>,
+    transfer_id: String,
+    sender_pubkey: PublicKey,
+    sender_ecdh_public_key: Vec<u8>,
+}
+
+fn decode_ecdh_public_key(b64: &str) -> Option<Vec<u8>> {
+    let bytes = STANDARD.decode(b64).ok()?;
+    (bytes.len() == 65 && bytes[0] == 0x04).then_some(bytes)
+}
 
 pub async fn receive_file_nostr(
     pin: &str,
     output_dir: Option<PathBuf>,
     on_conflict: OnConflict,
 ) -> Result<()> {
-    let pin = pin.trim();
-    if !is_valid_pin(pin) {
-        bail!("Invalid PIN");
+    let pin = normalize_pin_input(pin.trim());
+    if !is_valid_pin(&pin) {
+        bail!("Invalid PIN: check for typos and try again");
     }
+
+    // One PBKDF2 stretch per PIN; every lookup hint and handshake key is a
+    // cheap HKDF expansion off this root.
+    let step = Instant::now();
+    ui::status("Deriving PIN lookup keys...");
+    let root = tokio::task::spawn_blocking(move || PinRoot::derive(&pin))
+        .await
+        .context("PIN derivation task failed")?;
+    // The published hint is scoped to the rotation bucket the sender published
+    // in; derive every bucket a still-honored PIN can sit in.
+    let hints: Vec<String> = (0..=PIN_HINT_LOOKBACK_BUCKETS)
+        .map(|offset| root.hint(offset))
+        .collect();
+    let rendezvous_key = root.rendezvous_key();
+    let auth_key = root.auth_key();
+    ui::status_timed("Derived PIN lookup keys", step.elapsed());
 
     ui::status(&format!(
         "PIN fingerprint: {} (should match the sender's)",
-        format_pin_fingerprint(&compute_pin_fingerprint(pin))
+        format_pin_fingerprint(&root.fingerprint())
     ));
 
     let step = Instant::now();
@@ -51,20 +99,31 @@ pub async fn receive_file_nostr(
     ui::status_timed("Connected to Nostr relays", step.elapsed());
 
     ui::status("Searching for sender...");
-    let exchange = find_exchange_event(&client, pin).await?;
+    let rendezvous = find_rendezvous_event(&client, &hints, &rendezvous_key).await?;
 
-    let file_name = exchange.payload.file_name.clone();
-    let file_size = exchange.payload.file_size;
-    let mime_type = exchange.payload.mime_type.clone();
+    let file_name = rendezvous
+        .payload
+        .file_name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let file_size = rendezvous
+        .payload
+        .file_size
+        .context("Transfer is missing the file size")?;
+    let mime_type = rendezvous
+        .payload
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
 
     if file_size == 0 {
         bail!("Transfer describes an empty file");
     }
     if file_size > MAX_MESSAGE_SIZE {
         bail!(
-            "Transfer is {:.0} MB, which exceeds the {} MB limit",
-            file_size as f64 / 1024.0 / 1024.0,
-            MAX_MESSAGE_SIZE / 1024 / 1024
+            "Transfer is {}, which exceeds the {} limit",
+            format_bytes(file_size),
+            format_bytes(MAX_MESSAGE_SIZE)
         );
     }
 
@@ -75,23 +134,51 @@ pub async fn receive_file_nostr(
         return Ok(());
     };
 
-    let ack = create_authenticated_ack_event(
+    // Claim the transfer: prove PIN knowledge and bind our ephemeral ECDH key
+    // (and the sender's) into the sealed payload.
+    let ecdh = EcdhKeyPair::generate()?;
+    let receiver_ecdh_public_key_b64 = STANDARD.encode(ecdh.public_key_bytes);
+    let receiver_nonce = generate_handshake_nonce()?;
+    let sender_pubkey = rendezvous.sender_pubkey;
+    let transfer_id = rendezvous.transfer_id.clone();
+
+    let claim = ClaimPayload {
+        payload_type: "claim".to_string(),
+        transfer_id: transfer_id.clone(),
+        sender_nonce: rendezvous.payload.nonce.clone(),
+        receiver_nonce: receiver_nonce.clone(),
+        receiver_ecdh_public_key: receiver_ecdh_public_key_b64.clone(),
+        sender_ecdh_public_key: rendezvous.payload.ecdh_public_key.clone(),
+    };
+    let claim_event = create_handshake_event(
         &client,
-        &exchange.sender_pubkey,
-        &exchange.transfer_id,
-        0,
-        &exchange.keys.signals,
-        Some(&exchange.matched_hint),
+        &sender_pubkey,
+        &transfer_id,
+        HandshakeType::Claim,
+        &seal_handshake_payload(&auth_key, &claim)?,
     )?;
-    let step = Instant::now();
-    ui::status("Publishing receiver ready ACK to Nostr...");
-    client.publish(&ack).await?;
-    ui::status_timed("Published receiver ready ACK to Nostr", step.elapsed());
+
+    wait_for_confirm(
+        &client,
+        claim_event,
+        &auth_key,
+        &transfer_id,
+        &sender_pubkey,
+        &rendezvous.payload.nonce,
+        &receiver_nonce,
+        &receiver_ecdh_public_key_b64,
+    )
+    .await?;
+
+    // Session keys come from the ephemeral ECDH exchange the PIN just
+    // authenticated — the PIN derives no content or signaling keys.
+    let session_keys: NostrSessionKeys =
+        ecdh.derive_nostr_session_keys(&rendezvous.sender_ecdh_public_key, &rendezvous.salt)?;
+
     let connection_deadline = Instant::now() + CONNECTION_TIMEOUT;
 
     ui::status("Waiting for sender P2P offer...");
-    let sender_pubkey = exchange.sender_pubkey;
-    let signal_filter = signal_filter_from_sender(&exchange.transfer_id, sender_pubkey);
+    let signal_filter = signal_filter_from_sender(&transfer_id, sender_pubkey);
     let mut notifications = client.notifications();
     let sub_id = client.subscribe(signal_filter.clone()).await?;
     let mut seen = HashSet::new();
@@ -102,8 +189,8 @@ pub async fn receive_file_nostr(
         handle_pre_offer_signal(
             &event,
             &mut seen,
-            &exchange.keys.signals,
-            &exchange.transfer_id,
+            &session_keys.signals,
+            &transfer_id,
             sender_pubkey,
             &mut offer_sdp,
             &mut queued_candidates,
@@ -119,8 +206,8 @@ pub async fn receive_file_nostr(
             handle_pre_offer_signal(
                 &event,
                 &mut seen,
-                &exchange.keys.signals,
-                &exchange.transfer_id,
+                &session_keys.signals,
+                &transfer_id,
                 sender_pubkey,
                 &mut offer_sdp,
                 &mut queued_candidates,
@@ -158,10 +245,10 @@ pub async fn receive_file_nostr(
     publish_answer_and_candidates(
         &client,
         &sender_pubkey,
-        &exchange.transfer_id,
+        &transfer_id,
         &answer_sdp,
         &candidates,
-        &exchange.keys.signals,
+        &session_keys.signals,
     )
     .await?;
     ui::status_timed("Published P2P answer to Nostr", step.elapsed());
@@ -182,10 +269,10 @@ pub async fn receive_file_nostr(
                 publish_answer_and_candidates(
                     &client,
                     &sender_pubkey,
-                    &exchange.transfer_id,
+                    &transfer_id,
                     &answer_sdp,
                     &candidates,
-                    &exchange.keys.signals,
+                    &session_keys.signals,
                 ).await?;
                 ui::status_timed("Republished P2P answer to Nostr", step.elapsed());
             }
@@ -198,8 +285,8 @@ pub async fn receive_file_nostr(
                     &event,
                     &mut seen,
                     &peer,
-                    &exchange.keys.signals,
-                    &exchange.transfer_id,
+                    &session_keys.signals,
+                    &transfer_id,
                     sender_pubkey,
                 ).await?;
             }
@@ -209,10 +296,11 @@ pub async fn receive_file_nostr(
         }
     };
 
-    let open = open_and_detach(
-        data_channel,
-        remaining_connection_timeout(connection_deadline)?,
-    );
+    // The channel arriving means the P2P link is up; opening it is a local
+    // SCTP handshake, so give it a fresh window instead of whatever sliver of
+    // the signaling deadline is left. Mirrors the web receiver, which clears
+    // its pre-open connection timeout the moment the channel opens.
+    let open = open_and_detach(data_channel, CONNECTION_TIMEOUT);
     tokio::pin!(open);
     let raw = loop {
         tokio::select! {
@@ -223,10 +311,10 @@ pub async fn receive_file_nostr(
                 publish_answer_and_candidates(
                     &client,
                     &sender_pubkey,
-                    &exchange.transfer_id,
+                    &transfer_id,
                     &answer_sdp,
                     &candidates,
-                    &exchange.keys.signals,
+                    &session_keys.signals,
                 ).await?;
                 ui::status_timed("Republished P2P answer to Nostr", step.elapsed());
             }
@@ -236,8 +324,8 @@ pub async fn receive_file_nostr(
                     &event,
                     &mut seen,
                     &peer,
-                    &exchange.keys.signals,
-                    &exchange.transfer_id,
+                    &session_keys.signals,
+                    &transfer_id,
                     sender_pubkey,
                 ).await?;
             }
@@ -249,7 +337,7 @@ pub async fn receive_file_nostr(
     ui::status(&format!("Connected via {}", info.connection_type));
 
     let mut messenger = DcMessenger::new(raw);
-    let result = run_receiver(&mut messenger, &exchange.keys.p2p_content, &dest, file_size).await;
+    let result = run_receiver(&mut messenger, &session_keys.content, &dest, file_size).await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = peer.close().await;
@@ -268,51 +356,69 @@ fn remaining_connection_timeout(deadline: Instant) -> Result<Duration> {
     Ok(remaining)
 }
 
-async fn find_exchange_event(client: &NostrClient, pin: &str) -> Result<PinExchangeEvent> {
+/// Locate and decrypt the sender's rendezvous event.
+///
+/// Binds the authenticated payload to the plaintext routing data: the payload
+/// must name the event's own author and transfer id, so a copied ciphertext
+/// republished under another identity is rejected.
+async fn find_rendezvous_event(
+    client: &NostrClient,
+    hints: &[String],
+    rendezvous_key: &[u8; aes::AES_KEY_LEN],
+) -> Result<RendezvousMatch> {
     let step = Instant::now();
-    ui::status("Deriving PIN lookup hints...");
-    let hints = vec![compute_pin_hint(pin, 0), compute_pin_hint(pin, 1)];
-    ui::status_timed("Derived PIN lookup hints", step.elapsed());
-
-    let step = Instant::now();
-    ui::status("Fetching PIN exchange events from Nostr...");
-    let mut events = client.fetch(pin_exchange_filter(&hints)).await?;
+    ui::status("Fetching rendezvous events from Nostr...");
+    let mut events = client.fetch(rendezvous_filter(hints)).await?;
     ui::status_timed(
-        &format!("Fetched {} candidate PIN exchange event(s)", events.len()),
+        &format!("Fetched {} candidate rendezvous event(s)", events.len()),
         step.elapsed(),
     );
+
+    if events.is_empty() {
+        bail!(
+            "No transfer found for this PIN. It may have rotated — check the code currently shown on the sender."
+        );
+    }
+
     events.sort_by_key(|event| std::cmp::Reverse(event.created_at.as_secs()));
 
-    if !events.is_empty() {
-        ui::status("Decrypting candidate transfer metadata...");
-    }
+    ui::status("Decrypting candidate transfer metadata...");
     let decrypt_start = Instant::now();
     let mut saw_expired = false;
     let mut candidates_checked = 0usize;
     for event in events {
+        // A rendezvous event is only claimable while the sender still honors
+        // its PIN generation.
         let created_at_ms = event.created_at.as_secs() * 1000;
-        if now_ms().saturating_sub(created_at_ms) > TRANSFER_EXPIRATION_MS {
+        if now_ms().saturating_sub(created_at_ms) > PIN_TTL_MS {
             saw_expired = true;
             continue;
         }
 
-        let Some((matched_hint, salt, transfer_id, encrypted_payload)) =
-            parse_pin_exchange_event(&event)
+        let Some((_hint, salt, transfer_id, encrypted_payload)) = parse_rendezvous_event(&event)
         else {
             continue;
         };
         candidates_checked += 1;
 
-        let Ok(keys) = derive_nostr_transfer_keys(pin, &salt) else {
+        // Not sealed with our PIN (stale event sharing the hint tag)? Try the
+        // next candidate.
+        let Ok(decrypted) = aes::decrypt(rendezvous_key, &encrypted_payload) else {
             continue;
         };
-        let Ok(decrypted) = aes::decrypt(&keys.metadata, &encrypted_payload) else {
+        let Ok(payload) = serde_json::from_slice::<RendezvousPayload>(&decrypted) else {
             continue;
         };
-        let Ok(payload) = serde_json::from_slice::<PinExchangePayload>(&decrypted) else {
+
+        let Some(sender_ecdh_public_key) = decode_ecdh_public_key(&payload.ecdh_public_key)
+        else {
             continue;
         };
-        if payload.transfer_id != transfer_id {
+        if payload.payload_type != "rendezvous"
+            || payload.transfer_id != transfer_id
+            || payload.sender_pubkey != event.pubkey.to_hex()
+            || payload.nonce.is_empty()
+        {
             continue;
         }
 
@@ -320,32 +426,105 @@ async fn find_exchange_event(client: &NostrClient, pin: &str) -> Result<PinExcha
             &format!("Matched sender after {candidates_checked} candidate event(s)"),
             decrypt_start.elapsed(),
         );
-        return Ok(PinExchangeEvent {
+        return Ok(RendezvousMatch {
             payload,
             salt,
             transfer_id,
             sender_pubkey: event.pubkey,
-            matched_hint,
-            created_at_ms,
-            keys,
+            sender_ecdh_public_key,
         });
     }
 
     if saw_expired {
-        bail!("Transfer expired. Ask sender to start a new transfer.");
+        bail!("This PIN has expired. Enter the code currently shown on the sender.");
     }
-    bail!("No transfer found for this PIN");
+    bail!("Could not decrypt transfer. Wrong PIN?");
 }
 
-async fn publish_signal(
+/// Publish the claim and wait for the sender's confirm, verified under the
+/// same PIN auth key. Subscribes before publishing so the response cannot
+/// slip past, and polls as a backstop for relays that stored the confirm
+/// before the subscription landed.
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_confirm(
     client: &NostrClient,
-    sender_pubkey: &PublicKey,
+    claim_event: Event,
+    auth_key: &[u8; aes::AES_KEY_LEN],
     transfer_id: &str,
-    signal: Signal,
-    key: &[u8; aes::AES_KEY_LEN],
+    sender_pubkey: &PublicKey,
+    sender_nonce: &str,
+    receiver_nonce: &str,
+    receiver_ecdh_public_key_b64: &str,
 ) -> Result<()> {
-    let event = create_signal_event(client, sender_pubkey, transfer_id, signal, key)?;
-    client.publish(&event).await
+    let our_pubkey = client.public_key();
+    let confirm_filter = addressed_filter_from_author(transfer_id, &our_pubkey, *sender_pubkey);
+    let mut notifications = client.notifications();
+    let sub_id = client.subscribe(confirm_filter.clone()).await?;
+
+    let step = Instant::now();
+    ui::status("Publishing claim to Nostr...");
+    client.publish(&claim_event).await?;
+    ui::status_timed("Published claim to Nostr", step.elapsed());
+
+    ui::status("Waiting for sender confirmation...");
+    let mut seen = HashSet::new();
+
+    let verify = |event: &Event| -> bool {
+        let Some(handshake) = parse_handshake_event(event) else {
+            return false;
+        };
+        if handshake.handshake_type != HandshakeType::Confirm
+            || handshake.transfer_id != transfer_id
+            || handshake.author != *sender_pubkey
+        {
+            return false;
+        }
+        let Ok(payload) =
+            open_handshake_payload::<ConfirmPayload>(auth_key, &handshake.sealed_payload)
+        else {
+            return false; // Not sealed with our PIN
+        };
+        payload.payload_type == "confirm"
+            && payload.transfer_id == transfer_id
+            && payload.sender_nonce == sender_nonce
+            && payload.receiver_nonce == receiver_nonce
+            && payload.receiver_ecdh_public_key == receiver_ecdh_public_key_b64
+    };
+
+    let mut poll = tokio::time::interval(CONFIRM_POLL_INTERVAL);
+    poll.tick().await; // consume the immediate first tick
+
+    let wait = async {
+        loop {
+            tokio::select! {
+                event = next_event(&mut notifications) => {
+                    let event = event?;
+                    if seen.insert(event.id) && verify(&event) {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                _ = poll.tick() => {
+                    for event in client.fetch(confirm_filter.clone()).await? {
+                        if seen.insert(event.id) && verify(&event) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let result = tokio::time::timeout(CONFIRM_TIMEOUT, wait).await;
+    client.unsubscribe(&sub_id).await;
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => bail!(
+            "Sender did not confirm. The transfer may have been claimed by another device, or the sender went offline."
+        ),
+    }
+
+    ui::status("Sender confirmed the claim.");
+    Ok(())
 }
 
 async fn publish_answer_and_candidates(
@@ -356,34 +535,28 @@ async fn publish_answer_and_candidates(
     candidates: &[String],
     key: &[u8; aes::AES_KEY_LEN],
 ) -> Result<()> {
-    publish_signal(
-        client,
-        sender_pubkey,
-        transfer_id,
-        Signal::Answer {
-            sdp: answer_sdp.to_string(),
-        },
-        key,
-    )
-    .await?;
+    let mut signals = vec![Signal::Answer {
+        sdp: answer_sdp.to_string(),
+    }];
+    signals.extend(candidates.iter().map(|candidate| Signal::Candidate {
+        candidate: Some(CandidatePayload {
+            candidate: candidate.clone(),
+            sdp_mid: Some("0".to_string()),
+            sdp_m_line_index: Some(0),
+        }),
+    }));
 
-    for candidate in candidates {
-        publish_signal(
-            client,
-            sender_pubkey,
-            transfer_id,
-            Signal::Candidate {
-                candidate: Some(CandidatePayload {
-                    candidate: candidate.clone(),
-                    sdp_mid: Some("0".to_string()),
-                    sdp_m_line_index: Some(0),
-                }),
-            },
-            key,
-        )
-        .await?;
+    // Publish concurrently: a slow relay must not serialize the answer and
+    // every trickled candidate into a multiple of its latency.
+    let mut set = tokio::task::JoinSet::new();
+    for signal in signals {
+        let event = create_signal_event(client, sender_pubkey, transfer_id, signal, key)?;
+        let client = client.clone();
+        set.spawn(async move { client.publish(&event).await });
     }
-
+    while let Some(result) = set.join_next().await {
+        result.context("signal publish task failed")??;
+    }
     Ok(())
 }
 

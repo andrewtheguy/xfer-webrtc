@@ -1,10 +1,17 @@
 //! Nostr Auto Exchange sender compatible with secure-send-web.
+//!
+//! Handshake: publish a rendezvous event per PIN rotation, wait for a
+//! receiver's claim sealed with a still-honored PIN generation, lock the
+//! transfer to that receiver with a confirm, then derive the ECDH session
+//! keys and stream the file over a direct WebRTC data channel.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use nostr_sdk::prelude::*;
 use tokio::fs::File;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -12,24 +19,53 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::archive::SendSource;
 use crate::crypto::aes;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
+use crate::crypto::ecdh::{EcdhKeyPair, NostrSessionKeys, generate_salt};
 use crate::crypto::pin::{
-    compute_pin_fingerprint, compute_pin_hint, derive_nostr_transfer_keys, format_pin_fingerprint,
-    generate_pin, generate_salt, generate_transfer_id, is_expired, now_ms,
+    PIN_ACTIVE_GENERATIONS, PIN_ROTATION_MS, PinRoot, format_pin, format_pin_fingerprint,
+    generate_pin, generate_transfer_id,
 };
 use crate::signaling::nostr::{
-    self, CandidatePayload, NostrClient, PinExchangePayload, Signal, ack_filter,
-    create_pin_exchange_event, create_signal_event, parse_ack_event, parse_signal_event,
-    signal_filter_from_author,
+    self, CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
+    RendezvousPayload, Signal, addressed_filter, addressed_filter_from_author,
+    create_handshake_event, create_rendezvous_event, create_signal_event,
+    generate_handshake_nonce, open_handshake_payload, parse_handshake_event, parse_signal_event,
+    seal_handshake_payload,
 };
 use crate::transfer::run_sender;
 use crate::ui;
+use crate::util::format_bytes;
 use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
 use crate::webrtc::{add_ice_candidate_safely, advertise_max_message_size, candidate_strings};
 
-const WAIT_FOR_RECEIVER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// Total time the sender keeps rotating/waiting before giving up. A resource
+/// backstop, not a security control: rotation already caps any single PIN's
+/// exposure at `PIN_TTL_MS`, so waiting longer is not less safe. Mirrors
+/// secure-send-web's `PIN_WAIT_TIMEOUT_MS`.
+const WAIT_FOR_RECEIVER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 const OFFER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// One rotation generation of the displayed PIN. The sender retains the
+/// `PIN_ACTIVE_GENERATIONS` most recent so a PIN read just before a rotation
+/// still authenticates the receiver's claim.
+struct PinGeneration {
+    auth_key: [u8; aes::AES_KEY_LEN],
+    nonce: String,
+}
+
+/// A verified receiver claim: the transfer is locked to this peer.
+struct VerifiedClaim {
+    receiver_pubkey: PublicKey,
+    receiver_ecdh_public_key: Vec<u8>,
+    payload: ClaimPayload,
+    auth_key: [u8; aes::AES_KEY_LEN],
+}
+
+fn decode_ecdh_public_key(b64: &str) -> Option<Vec<u8>> {
+    let bytes = STANDARD.decode(b64).ok()?;
+    (bytes.len() == 65 && bytes[0] == 0x04).then_some(bytes)
+}
 
 pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
     let file_size = source.file_size;
@@ -38,25 +74,22 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
 
     if file_size > MAX_MESSAGE_SIZE {
         bail!(
-            "File is {:.0} MB, which exceeds the {} MB limit",
-            file_size as f64 / 1024.0 / 1024.0,
-            MAX_MESSAGE_SIZE / 1024 / 1024
+            "File is {}, which exceeds the {} limit",
+            format_bytes(file_size),
+            format_bytes(MAX_MESSAGE_SIZE)
         );
     }
 
-    let session_start = now_ms();
+    // Per-transfer credentials: public salt (HKDF input for the ECDH session
+    // keys), ephemeral Nostr identity, and the ephemeral ECDH key pair whose
+    // shared secret will protect signaling and content.
     let step = Instant::now();
-    ui::status("Generating secure PIN material...");
-    let pin = generate_pin()?;
-    let hint = compute_pin_hint(&pin, 0);
+    ui::status("Preparing secure keys...");
     let salt = generate_salt()?;
     let transfer_id = generate_transfer_id()?;
-    ui::status_timed("Generated secure PIN material", step.elapsed());
-
-    let step = Instant::now();
-    ui::status("Deriving PIN session keys...");
-    let keys = derive_nostr_transfer_keys(&pin, &salt)?;
-    ui::status_timed("Derived PIN session keys", step.elapsed());
+    let ecdh = EcdhKeyPair::generate()?;
+    let ecdh_public_key_b64 = STANDARD.encode(ecdh.public_key_bytes);
+    ui::status_timed("Prepared secure keys", step.elapsed());
 
     let step = Instant::now();
     ui::status("Connecting to Nostr relays...");
@@ -70,42 +103,49 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
         step.elapsed(),
     );
 
-    let step = Instant::now();
-    ui::status("Encrypting transfer metadata...");
-    let payload = PinExchangePayload {
-        content_type: "file".to_string(),
-        transfer_id: transfer_id.clone(),
-        sender_pubkey: client.public_key_hex(),
-        relays: nostr::default_relays_vec(),
-        file_name: file_name.clone(),
+    let rendezvous = RendezvousContext {
+        client: &client,
+        salt: &salt,
+        transfer_id: &transfer_id,
+        sender_pubkey_hex: client.public_key_hex(),
+        ecdh_public_key_b64: &ecdh_public_key_b64,
+        file_name: &file_name,
         file_size,
-        mime_type: mime_type.clone(),
+        mime_type: &mime_type,
     };
-    let encrypted_payload = aes::encrypt(&keys.metadata, &serde_json::to_vec(&payload)?)?;
-    let exchange_event =
-        create_pin_exchange_event(&client, &encrypted_payload, &salt, &transfer_id, &hint)?;
-    ui::status_timed("Encrypted transfer metadata", step.elapsed());
 
+    let claim = wait_for_verified_claim(&client, &rendezvous, &sender_pubkey).await?;
+
+    // First-claim lockout: rotation has stopped and every retained PIN
+    // generation is dropped; the PIN is no longer needed for display.
+    ui::hide_pin();
+    ui::status("Receiver claim verified.");
+
+    // Mutual proof: confirm under the same PIN-derived auth key that sealed
+    // the claim, echoing both nonces and the receiver key we locked onto.
+    let confirm = ConfirmPayload {
+        payload_type: "confirm".to_string(),
+        transfer_id: transfer_id.clone(),
+        sender_nonce: claim.payload.sender_nonce.clone(),
+        receiver_nonce: claim.payload.receiver_nonce.clone(),
+        receiver_ecdh_public_key: claim.payload.receiver_ecdh_public_key.clone(),
+    };
+    let confirm_event = create_handshake_event(
+        &client,
+        &claim.receiver_pubkey,
+        &transfer_id,
+        HandshakeType::Confirm,
+        &seal_handshake_payload(&claim.auth_key, &confirm)?,
+    )?;
     let step = Instant::now();
-    ui::status("Publishing PIN exchange to Nostr...");
-    client.publish(&exchange_event).await?;
-    ui::status_timed("Published PIN exchange to Nostr", step.elapsed());
+    ui::status("Publishing confirmation to Nostr...");
+    client.publish(&confirm_event).await?;
+    ui::status_timed("Published confirmation to Nostr", step.elapsed());
 
-    ui::show_pin(
-        &file_name,
-        file_size,
-        &pin,
-        &format_pin_fingerprint(&compute_pin_fingerprint(&pin)),
-    );
-
-    ui::status("Waiting for receiver...");
-    let receiver_pubkey =
-        wait_for_receiver_ack(&client, &transfer_id, &sender_pubkey, &keys.signals).await?;
-    ui::status("Receiver ready ACK received.");
-
-    if is_expired(session_start) {
-        bail!("Session expired. Please start a new transfer.");
-    }
+    // Session keys come from the ephemeral ECDH exchange the PIN just
+    // authenticated — the PIN derives no content or signaling keys.
+    let session_keys: NostrSessionKeys =
+        ecdh.derive_nostr_session_keys(&claim.receiver_ecdh_public_key, &salt)?;
 
     ui::status("Creating P2P connection...");
     let mut peer = WebRtcPeer::new().await?;
@@ -119,7 +159,8 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
     let offer_sdp = advertise_max_message_size(offer.sdp);
     let candidates = candidate_strings(candidates)?;
 
-    let signal_filter = signal_filter_from_author(&transfer_id, &sender_pubkey, receiver_pubkey);
+    let signal_filter =
+        addressed_filter_from_author(&transfer_id, &sender_pubkey, claim.receiver_pubkey);
     let mut notifications = client.notifications();
     let sub_id = client.subscribe(signal_filter.clone()).await?;
 
@@ -131,7 +172,7 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
         &transfer_id,
         &offer_sdp,
         &candidates,
-        &keys.signals,
+        &session_keys.signals,
     )
     .await?;
     ui::status_timed("Published P2P offer to Nostr", step.elapsed());
@@ -146,9 +187,9 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
             &event,
             &mut seen,
             &peer,
-            &keys.signals,
+            &session_keys.signals,
             &transfer_id,
-            receiver_pubkey,
+            claim.receiver_pubkey,
             &mut answer_set,
             &mut queued_candidates,
         )
@@ -171,7 +212,7 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
                         &transfer_id,
                         &offer_sdp,
                         &candidates,
-                        &keys.signals,
+                        &session_keys.signals,
                     ).await?;
                     ui::status_timed("Republished P2P offer to Nostr", step.elapsed());
                 }
@@ -181,9 +222,9 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
                         &event,
                         &mut seen,
                         &peer,
-                        &keys.signals,
+                        &session_keys.signals,
                         &transfer_id,
-                        receiver_pubkey,
+                        claim.receiver_pubkey,
                         &mut answer_set,
                         &mut queued_candidates,
                     )
@@ -208,9 +249,9 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
                     &event,
                     &mut seen,
                     &peer,
-                    &keys.signals,
+                    &session_keys.signals,
                     &transfer_id,
-                    receiver_pubkey,
+                    claim.receiver_pubkey,
                     &mut answer_set,
                     &mut queued_candidates,
                 ).await?;
@@ -226,7 +267,7 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
     let mut file = File::open(&source.path)
         .await
         .with_context(|| format!("Cannot open {}", source.path.display()))?;
-    let result = run_sender(&mut messenger, &keys.p2p_content, &mut file, file_size).await;
+    let result = run_sender(&mut messenger, &session_keys.content, &mut file, file_size).await;
 
     let _ = peer.close().await;
     client.disconnect().await;
@@ -236,64 +277,194 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_receiver_ack(
-    client: &NostrClient,
-    transfer_id: &str,
-    sender_pubkey: &PublicKey,
-    key: &[u8; aes::AES_KEY_LEN],
-) -> Result<PublicKey> {
-    let filter = ack_filter(transfer_id, sender_pubkey);
-    let mut notifications = client.notifications();
-    let step = Instant::now();
-    ui::status("Subscribing for receiver ready ACK...");
-    let sub_id = client.subscribe(filter.clone()).await?;
-    ui::status_timed("Subscribed for receiver ready ACK", step.elapsed());
-    let mut seen = HashSet::new();
-
-    let step = Instant::now();
-    ui::status("Checking existing receiver ready ACK events...");
-    let events = client.fetch(filter).await?;
-    ui::status_timed(
-        &format!("Fetched {} existing ACK event(s)", events.len()),
-        step.elapsed(),
-    );
-
-    for event in events {
-        seen.insert(event.id);
-        if let Some(ack) = parse_ack_event(&event, key, transfer_id, 0) {
-            client.unsubscribe(&sub_id).await;
-            return Ok(ack.receiver_pubkey);
-        }
-    }
-
-    ui::status("Listening for receiver ready ACK...");
-    let receiver = tokio::time::timeout(WAIT_FOR_RECEIVER_TIMEOUT, async {
-        loop {
-            let event = next_event(&mut notifications).await?;
-            if !seen.insert(event.id) {
-                continue;
-            }
-            if let Some(ack) = parse_ack_event(&event, key, transfer_id, 0) {
-                return Ok::<PublicKey, anyhow::Error>(ack.receiver_pubkey);
-            }
-        }
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("Timed out waiting for receiver"))??;
-
-    client.unsubscribe(&sub_id).await;
-    Ok(receiver)
+/// Everything a rendezvous publication needs; stable across rotations.
+struct RendezvousContext<'a> {
+    client: &'a NostrClient,
+    salt: &'a [u8],
+    transfer_id: &'a str,
+    sender_pubkey_hex: String,
+    ecdh_public_key_b64: &'a str,
+    file_name: &'a str,
+    file_size: u64,
+    mime_type: &'a str,
 }
 
-async fn publish_signal(
+impl RendezvousContext<'_> {
+    /// Mint a fresh PIN, publish its rendezvous event, and display it.
+    /// Returns the generation the sender must retain to verify claims.
+    async fn publish_fresh_pin(&self) -> Result<PinGeneration> {
+        let pin = generate_pin()?;
+        // The PBKDF2 stretch is CPU-bound (~600k iterations); keep it off the
+        // async runtime worker.
+        let root = tokio::task::spawn_blocking({
+            let pin = pin.clone();
+            move || PinRoot::derive(&pin)
+        })
+        .await
+        .context("PIN derivation task failed")?;
+
+        let nonce = generate_handshake_nonce()?;
+        let payload = RendezvousPayload {
+            payload_type: "rendezvous".to_string(),
+            content_type: "file".to_string(),
+            transfer_id: self.transfer_id.to_string(),
+            sender_pubkey: self.sender_pubkey_hex.clone(),
+            ecdh_public_key: self.ecdh_public_key_b64.to_string(),
+            nonce: nonce.clone(),
+            relays: Some(nostr::default_relays_vec()),
+            file_name: Some(self.file_name.to_string()),
+            file_size: Some(self.file_size),
+            mime_type: Some(self.mime_type.to_string()),
+        };
+        let encrypted = aes::encrypt(&root.rendezvous_key(), &serde_json::to_vec(&payload)?)?;
+        let event = create_rendezvous_event(
+            self.client,
+            &encrypted,
+            self.salt,
+            self.transfer_id,
+            &root.hint(0),
+        )?;
+        self.client.publish(&event).await?;
+
+        ui::show_pin(
+            self.file_name,
+            self.file_size,
+            &format_pin(&pin),
+            &format_pin_fingerprint(&root.fingerprint()),
+        );
+
+        Ok(PinGeneration {
+            auth_key: root.auth_key(),
+            nonce,
+        })
+    }
+}
+
+/// Rotate the PIN until a receiver proves knowledge of one of the retained
+/// generations, then lock the transfer to that receiver. An on-demand refresh
+/// ([`ui::request_pin_refresh`]) drops every retained generation and publishes
+/// a fresh PIN immediately.
+async fn wait_for_verified_claim(
     client: &NostrClient,
+    rendezvous: &RendezvousContext<'_>,
     sender_pubkey: &PublicKey,
+) -> Result<VerifiedClaim> {
+    // Subscribe before the first publish so a fast claim can never slip past.
+    let filter = addressed_filter(rendezvous.transfer_id, sender_pubkey);
+    let mut notifications = client.notifications();
+    let sub_id = client.subscribe(filter).await?;
+
+    // Newest generation first; truncated to PIN_ACTIVE_GENERATIONS.
+    let mut generations: Vec<PinGeneration> = Vec::with_capacity(PIN_ACTIVE_GENERATIONS + 1);
+    let mut seen = HashSet::new();
+    let refresh = ui::pin_refresh_signal();
+
+    let rotation_period = Duration::from_millis(PIN_ROTATION_MS);
+    let mut rotation = tokio::time::interval_at(
+        tokio::time::Instant::now() + rotation_period,
+        rotation_period,
+    );
+
+    let deadline = tokio::time::sleep(WAIT_FOR_RECEIVER_TIMEOUT);
+    tokio::pin!(deadline);
+
+    fn register(generations: &mut Vec<PinGeneration>, generation: PinGeneration) {
+        generations.insert(0, generation);
+        generations.truncate(PIN_ACTIVE_GENERATIONS);
+    }
+
+    register(&mut generations, rendezvous.publish_fresh_pin().await?);
+    ui::status("Waiting for receiver...");
+
+    let claim = loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                client.unsubscribe(&sub_id).await;
+                bail!("No receiver connected. Please start a new transfer.");
+            }
+
+            _ = rotation.tick() => {
+                ui::status("Rotating PIN...");
+                register(&mut generations, rendezvous.publish_fresh_pin().await?);
+                ui::status("Waiting for receiver...");
+            }
+
+            _ = refresh.notified() => {
+                // Drop every retained generation so previously shown PINs stop
+                // authenticating, restart the rotation cadence, and publish a
+                // fresh rendezvous.
+                ui::status("Refreshing PIN...");
+                generations.clear();
+                rotation.reset();
+                register(&mut generations, rendezvous.publish_fresh_pin().await?);
+                ui::status("Waiting for receiver...");
+            }
+
+            event = next_event(&mut notifications) => {
+                let event = event?;
+                if !seen.insert(event.id) {
+                    continue;
+                }
+                if let Some(claim) =
+                    verify_claim(&event, &generations, rendezvous.transfer_id, rendezvous.ecdh_public_key_b64)
+                {
+                    break claim;
+                }
+            }
+        }
+    };
+
+    client.unsubscribe(&sub_id).await;
+    Ok(claim)
+}
+
+/// Try every retained PIN generation against a claim event; a claim sealed
+/// with a rotated-but-still-honored PIN must not be rejected. Invalid claims
+/// are ignored, never fatal: transfer tags are public, so aborting here would
+/// let anyone deny the transfer.
+fn verify_claim(
+    event: &Event,
+    generations: &[PinGeneration],
     transfer_id: &str,
-    signal: Signal,
-    key: &[u8; aes::AES_KEY_LEN],
-) -> Result<()> {
-    let event = create_signal_event(client, sender_pubkey, transfer_id, signal, key)?;
-    client.publish(&event).await
+    sender_ecdh_public_key_b64: &str,
+) -> Option<VerifiedClaim> {
+    let handshake = parse_handshake_event(event)?;
+    if handshake.handshake_type != HandshakeType::Claim || handshake.transfer_id != transfer_id {
+        return None;
+    }
+
+    for generation in generations {
+        let Ok(payload) = open_handshake_payload::<ClaimPayload>(
+            &generation.auth_key,
+            &handshake.sealed_payload,
+        ) else {
+            continue; // Sealed with a different PIN/generation
+        };
+
+        let receiver_ecdh_public_key = decode_ecdh_public_key(&payload.receiver_ecdh_public_key);
+
+        // The payload opened under this generation's key; its contents must
+        // bind the proof to this transfer, this rotation's nonce, and both
+        // ECDH public keys (what makes the ECDH session MITM-proof).
+        if payload.payload_type != "claim"
+            || payload.transfer_id != transfer_id
+            || payload.sender_nonce != generation.nonce
+            || payload.receiver_nonce.is_empty()
+            || payload.sender_ecdh_public_key != sender_ecdh_public_key_b64
+        {
+            return None;
+        }
+        let receiver_ecdh_public_key = receiver_ecdh_public_key?;
+
+        return Some(VerifiedClaim {
+            receiver_pubkey: event.pubkey,
+            receiver_ecdh_public_key,
+            payload,
+            auth_key: generation.auth_key,
+        });
+    }
+
+    None
 }
 
 async fn publish_offer_and_candidates(
@@ -304,34 +475,37 @@ async fn publish_offer_and_candidates(
     candidates: &[String],
     key: &[u8; aes::AES_KEY_LEN],
 ) -> Result<()> {
-    publish_signal(
-        client,
-        sender_pubkey,
-        transfer_id,
-        Signal::Offer {
-            sdp: offer_sdp.to_string(),
-        },
-        key,
-    )
-    .await?;
+    let mut signals = vec![Signal::Offer {
+        sdp: offer_sdp.to_string(),
+    }];
+    signals.extend(candidates.iter().map(|candidate| Signal::Candidate {
+        candidate: Some(CandidatePayload {
+            candidate: candidate.clone(),
+            sdp_mid: Some("0".to_string()),
+            sdp_m_line_index: Some(0),
+        }),
+    }));
+    publish_signals_concurrently(client, sender_pubkey, transfer_id, signals, key).await
+}
 
-    for candidate in candidates {
-        publish_signal(
-            client,
-            sender_pubkey,
-            transfer_id,
-            Signal::Candidate {
-                candidate: Some(CandidatePayload {
-                    candidate: candidate.clone(),
-                    sdp_mid: Some("0".to_string()),
-                    sdp_m_line_index: Some(0),
-                }),
-            },
-            key,
-        )
-        .await?;
+/// Publish signaling events concurrently: a slow relay must not serialize the
+/// offer/answer and every trickled candidate into a multiple of its latency.
+async fn publish_signals_concurrently(
+    client: &NostrClient,
+    sender_pubkey: &PublicKey,
+    transfer_id: &str,
+    signals: Vec<Signal>,
+    key: &[u8; aes::AES_KEY_LEN],
+) -> Result<()> {
+    let mut set = tokio::task::JoinSet::new();
+    for signal in signals {
+        let event = create_signal_event(client, sender_pubkey, transfer_id, signal, key)?;
+        let client = client.clone();
+        set.spawn(async move { client.publish(&event).await });
     }
-
+    while let Some(result) = set.join_next().await {
+        result.context("signal publish task failed")??;
+    }
     Ok(())
 }
 

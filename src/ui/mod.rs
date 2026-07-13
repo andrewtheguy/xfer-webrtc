@@ -11,11 +11,11 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::util::{calc_percent, format_bytes};
 
@@ -49,11 +49,32 @@ pub enum UiEvent {
         pin: String,
         fingerprint: String,
     },
+    /// The PIN is no longer valid (a receiver claimed the transfer); stop
+    /// displaying it.
+    HidePin,
     Incoming { file_name: String, size: u64 },
     FileExists { path: PathBuf, reply: oneshot::Sender<FileExistsChoice> },
 }
 
 static TUI_SINK: OnceLock<mpsc::UnboundedSender<UiEvent>> = OnceLock::new();
+
+/// On-demand PIN refresh requests (TUI `r` key → Nostr sender). A
+/// [`Notify`] with `notify_one` semantics: a request made moments before the
+/// sender awaits is stored as a permit, not lost.
+static PIN_REFRESH: OnceLock<Arc<Notify>> = OnceLock::new();
+
+/// The shared PIN-refresh signal. The Nostr sender awaits it while waiting
+/// for a receiver; [`request_pin_refresh`] fires it.
+pub fn pin_refresh_signal() -> Arc<Notify> {
+    PIN_REFRESH.get_or_init(|| Arc::new(Notify::new())).clone()
+}
+
+/// Ask the running Nostr sender to mint and publish a fresh PIN immediately,
+/// invalidating every previously shown PIN. No-op unless a transfer is
+/// waiting for a receiver.
+pub fn request_pin_refresh() {
+    pin_refresh_signal().notify_one();
+}
 
 /// Route all subsequent UI output to the TUI as [`UiEvent`]s. Call once,
 /// before spawning the transfer task.
@@ -152,6 +173,15 @@ pub fn show_pin(file_name: &str, file_size: u64, pin: &str, fingerprint: &str) {
     );
     println!("{pin}");
     eprintln!("PIN fingerprint: {fingerprint} (should match the receiver's)");
+}
+
+/// Stop displaying the PIN: a receiver claimed the transfer, so every shown
+/// PIN is now invalid. Plain mode prints nothing — the sender's status line
+/// already reports the claim.
+pub fn hide_pin() {
+    if let Some(tx) = sink() {
+        let _ = tx.send(UiEvent::HidePin);
+    }
 }
 
 /// Announce the incoming file a receiver is about to accept.

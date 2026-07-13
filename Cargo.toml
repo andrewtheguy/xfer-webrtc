@@ -38,6 +38,8 @@ flate2 = "1"
 # Multi-file/folder packaging (secure-send-web zips multiple inputs into one archive)
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
+# Local-time archive-name timestamps (matches secure-send-web's archiveTimestamp)
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Nostr signaling
 nostr-sdk = "0.44.1"
