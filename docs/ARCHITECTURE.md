@@ -1,6 +1,6 @@
 # Architecture
 
-`xfer-webrtc` is a CLI client for `secure-send-web`. The web app is the source
+`secure-send-cli` is a CLI client for `secure-send-web`. The web app is the source
 of truth for protocol shape and compatibility.
 
 ## Modes
@@ -92,5 +92,5 @@ incoming data-channel message, including `DONE:<total_chunks>`.
 
 ## Scope
 
-The CLI intentionally has no legacy xfer-code protocol, no resume path, no QR
+The CLI intentionally has no legacy signaling protocol, no resume path, no QR
 support, no relay discovery, and no custom fallback mode.

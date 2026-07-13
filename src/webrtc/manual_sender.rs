@@ -83,7 +83,7 @@ pub async fn send_file_manual(path: &Path) -> Result<()> {
         "Ready to send \"{}\" ({} bytes). Give this offer code to the receiver:",
         file_name, file_size
     ));
-    ui::show_code("XFER OFFER", &offer_code);
+    ui::show_code("SECURE SEND OFFER", &offer_code);
 
     // Read the receiver's answer code.
     let answer_code = ui::prompt_multiline("Paste the receiver's response code:")?;

@@ -1,5 +1,5 @@
 /target
-xfer_*
+secure_send_cli_*
 .idea/
 build/
 tmp/

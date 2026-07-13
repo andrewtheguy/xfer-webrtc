@@ -1,4 +1,4 @@
-//! xfer-webrtc: CLI companion to secure-send-web for peer-to-peer file transfer.
+//! secure-send-cli: CLI companion to secure-send-web for peer-to-peer file transfer.
 //!
 //! Nostr PIN mode matches secure-send-web's Auto Exchange flow. Manual
 //! copy/paste mode exchanges SS03 offer/answer codes. QR support is intentionally
@@ -9,11 +9,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use xfer_webrtc::util::is_interrupted;
-use xfer_webrtc::{ui, webrtc};
+use secure_send_cli::util::is_interrupted;
+use secure_send_cli::{ui, webrtc};
 
 #[derive(Parser)]
-#[command(name = "xfer-webrtc")]
+#[command(name = "secure-send-cli")]
 #[command(about = "Secure peer-to-peer file transfer, compatible with secure-send-web")]
 #[command(version)]
 struct Cli {

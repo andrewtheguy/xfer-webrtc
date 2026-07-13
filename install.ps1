@@ -1,10 +1,10 @@
 #!/usr/bin/env pwsh
 
-# Xfer installer for Windows
-# Downloads latest binary from: https://github.com/andrewtheguy/xfer-webrtc/releases
+# Secure Send CLI installer for Windows
+# Downloads latest binary from: https://github.com/andrewtheguy/secure-send-cli/releases
 #
 # Invocation is now argument-parsed only (compat-breaking): flags are read from
-# $args or $env:XFER_INSTALL_ARGS. Param binding is removed.
+# $args or $env:SECURE_SEND_CLI_INSTALL_ARGS. Param binding is removed.
 
 # Defaults (will be overwritten by fallback arg parser)
 $ReleaseTag   = $null
@@ -15,12 +15,12 @@ $DownloadOnly = $false
 $ErrorActionPreference = "Stop"
 
 $REPO_OWNER = "andrewtheguy"
-$REPO_NAME = "xfer-webrtc"
+$REPO_NAME = "secure-send-cli"
 
 # Allow passing flags when the script is piped into Invoke-Expression (iex) where
 # normal PowerShell parameter binding is unavailable. Users can set
-# $env:XFER_INSTALL_ARGS to a PowerShell-style argument string, e.g.:
-#   $env:XFER_INSTALL_ARGS='-PreRelease'; irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
+# $env:SECURE_SEND_CLI_INSTALL_ARGS to a PowerShell-style argument string, e.g.:
+#   $env:SECURE_SEND_CLI_INSTALL_ARGS='-PreRelease'; irm https://andrewtheguy.github.io/secure-send-cli/install.ps1 | iex
 # This keeps the single-line install experience while still supporting flags.
 
 # Function to print colored messages
@@ -189,11 +189,11 @@ function Get-BinaryName {
         exit 1
     }
 
-    return "xfer-webrtc-windows-amd64.exe"
+    return "secure-send-cli-windows-amd64.exe"
 }
 
 function Get-InstallName {
-    return "xfer-webrtc.exe"
+    return "secure-send-cli.exe"
 }
 
 # Parse argument strings (e.g., from environment variables) using PowerShell's tokenizer
@@ -208,7 +208,7 @@ function Parse-ArgString {
     $tokens = [System.Management.Automation.PSParser]::Tokenize($ArgString, [ref]$errors)
 
     if ($errors -and $errors.Count -gt 0) {
-        Print-Warn "Could not parse XFER_INSTALL_ARGS: $($errors[0].Message)"
+        Print-Warn "Could not parse SECURE_SEND_CLI_INSTALL_ARGS: $($errors[0].Message)"
         return @()
     }
 
@@ -332,9 +332,9 @@ function Install-Binary {
     )
 
     $url = "$BaseUrl/$BinaryName"
-    $tempDir = Join-Path $env:TEMP "xfer-install-$(Get-Random)"
+    $tempDir = Join-Path $env:TEMP "secure-send-cli-install-$(Get-Random)"
     $tempBinary = Join-Path $tempDir $BinaryName
-    $installDir = Join-Path $env:LOCALAPPDATA "Programs\xfer"
+    $installDir = Join-Path $env:LOCALAPPDATA "Programs\secure-send-cli"
     $installName = Get-InstallName
     $finalPath = Join-Path $installDir $installName
 
@@ -408,7 +408,7 @@ function Show-Usage {
     Write-Host @"
 Usage: .\install.ps1 [OPTIONS] [RELEASE_TAG]
 
-Download and install xfer-webrtc binary
+Download and install secure-send-cli binary
 
 Options:
   -DownloadOnly  Download binary to current directory without installing
@@ -421,17 +421,17 @@ Arguments:
 
 Environment variables:
   `$env:RELEASE_TAG    Alternative way to specify release tag
-    `$env:XFER_INSTALL_ARGS  Fallback flags for iex one-liners (e.g. "-PreRelease")
+    `$env:SECURE_SEND_CLI_INSTALL_ARGS  Fallback flags for iex one-liners (e.g. "-PreRelease")
 
 Examples:
-    .\install.ps1                              # Install latest xfer-webrtc (args-only parser)
+    .\install.ps1                              # Install latest secure-send-cli (args-only parser)
     .\install.ps1 20251210172710               # Install specific release
     .\install.ps1 -PreRelease                  # Install latest prerelease
     .\install.ps1 -DownloadOnly                # Download latest to current directory
     .\install.ps1 -DownloadOnly 20251210172710 # Download specific release
     .\install.ps1 -Admin                       # Allow admin installation (not recommended)
     `$env:RELEASE_TAG='latest'; .\install.ps1  # Use environment variable
-    `$env:XFER_INSTALL_ARGS='-PreRelease'; irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
+    `$env:SECURE_SEND_CLI_INSTALL_ARGS='-PreRelease'; irm https://andrewtheguy.github.io/secure-send-cli/install.ps1 | iex
 
 Supported platforms: Windows (amd64)
 
@@ -472,10 +472,10 @@ function Start-Installation {
     )
 
     if ($DownloadOnly) {
-        Print-Info "Xfer downloader"
+        Print-Info "Secure Send CLI downloader"
     }
     else {
-        Print-Info "Xfer installer"
+        Print-Info "Secure Send CLI installer"
     }
     Print-Info "Release: $Tag"
     Print-Info "Repository: $REPO_OWNER/$REPO_NAME"
@@ -524,13 +524,13 @@ function Main {
         if ($args -and $args.Count -gt 0) {
             $fallbackArgs += $args
         }
-        if ($env:XFER_INSTALL_ARGS) {
-            $fallbackArgs += (Parse-ArgString -ArgString $env:XFER_INSTALL_ARGS)
+        if ($env:SECURE_SEND_CLI_INSTALL_ARGS) {
+            $fallbackArgs += (Parse-ArgString -ArgString $env:SECURE_SEND_CLI_INSTALL_ARGS)
         }
         Apply-FallbackArgs -ArgList $fallbackArgs
 
         # Extra guard: honor env flags even if tokenization failed
-        $envArgs = $env:XFER_INSTALL_ARGS
+        $envArgs = $env:SECURE_SEND_CLI_INSTALL_ARGS
         if ($envArgs) {
             if (-not $PreRelease -and $envArgs -match '(?i)(^|\s)--?prerelease(\s|$)') { $PreRelease = $true }
             if (-not $DownloadOnly -and $envArgs -match '(?i)(^|\s)--?downloadonly(\s|$)') { $DownloadOnly = $true }
@@ -548,10 +548,10 @@ function Main {
     }
 
     if ($DownloadOnly) {
-        Print-Info "Starting Xfer download..."
+        Print-Info "Starting Secure Send CLI download..."
     }
     else {
-        Print-Info "Starting Xfer installation..."
+        Print-Info "Starting Secure Send CLI installation..."
     }
 
     # Determine release tag
@@ -583,7 +583,7 @@ try {
 }
 finally {
     # Clean up the fallback args variable to avoid persistence across sessions
-    if (Test-Path env:XFER_INSTALL_ARGS) {
-        Remove-Item env:XFER_INSTALL_ARGS -ErrorAction SilentlyContinue
+    if (Test-Path env:SECURE_SEND_CLI_INSTALL_ARGS) {
+        Remove-Item env:SECURE_SEND_CLI_INSTALL_ARGS -ErrorAction SilentlyContinue
     }
 }

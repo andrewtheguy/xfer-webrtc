@@ -2284,6 +2284,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "secure-send-cli"
+version = "0.0.8"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64",
+ "bytes",
+ "clap",
+ "env_logger",
+ "flate2",
+ "getrandom 0.2.17",
+ "hkdf",
+ "log",
+ "nostr-sdk",
+ "p256",
+ "pbkdf2",
+ "rustls",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "webrtc",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3424,33 +3451,6 @@ dependencies = [
  "rusticata-macros",
  "thiserror 1.0.69",
  "time",
-]
-
-[[package]]
-name = "xfer-webrtc"
-version = "0.0.8"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "base64",
- "bytes",
- "clap",
- "env_logger",
- "flate2",
- "getrandom 0.2.17",
- "hkdf",
- "log",
- "nostr-sdk",
- "p256",
- "pbkdf2",
- "rustls",
- "rustyline",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "webrtc",
 ]
 
 [[package]]

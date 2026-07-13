@@ -75,14 +75,14 @@ jobs:
       - name: Build Release
         run: cargo build --release --all-features --target ${{ matrix.target }}
 
-      - name: Rename WebRTC Binary
-        run: mv target/${{ matrix.target }}/release/xfer-webrtc target/release/xfer-webrtc-${{ matrix.suffix }}
+      - name: Rename CLI binary
+        run: mv target/${{ matrix.target }}/release/secure-send-cli target/release/secure-send-cli-${{ matrix.suffix }}
 
-      - name: Upload WebRTC release artifact
+      - name: Upload CLI release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-webrtc-${{ matrix.suffix }}
-          path: target/release/xfer-webrtc-${{ matrix.suffix }}
+          name: release-secure-send-cli-${{ matrix.suffix }}
+          path: target/release/secure-send-cli-${{ matrix.suffix }}
 
   build-macos:
     needs: setup
@@ -104,14 +104,14 @@ jobs:
       - name: Build Release
         run: cargo build --release --all-features --target ${{ matrix.target }}
 
-      - name: Rename WebRTC Binary
-        run: mv target/${{ matrix.target }}/release/xfer-webrtc target/release/xfer-webrtc-${{ matrix.suffix }}
+      - name: Rename CLI binary
+        run: mv target/${{ matrix.target }}/release/secure-send-cli target/release/secure-send-cli-${{ matrix.suffix }}
 
-      - name: Upload WebRTC release artifact
+      - name: Upload CLI release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-webrtc-${{ matrix.suffix }}
-          path: target/release/xfer-webrtc-${{ matrix.suffix }}
+          name: release-secure-send-cli-${{ matrix.suffix }}
+          path: target/release/secure-send-cli-${{ matrix.suffix }}
 
   build-windows:
     needs: setup
@@ -132,14 +132,14 @@ jobs:
       - name: Build Release
         run: cargo build --release --all-features --target ${{ env.TARGET }}
 
-      - name: Rename WebRTC Binary
-        run: move target\${{ env.TARGET }}\release\xfer-webrtc.exe target\release\xfer-webrtc-${{ env.SUFFIX }}.exe
+      - name: Rename CLI binary
+        run: move target\${{ env.TARGET }}\release\secure-send-cli.exe target\release\secure-send-cli-${{ env.SUFFIX }}.exe
 
-      - name: Upload WebRTC release artifact
+      - name: Upload CLI release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-webrtc-${{ env.SUFFIX }}
-          path: target/release/xfer-webrtc-${{ env.SUFFIX }}.exe
+          name: release-secure-send-cli-${{ env.SUFFIX }}
+          path: target/release/secure-send-cli-${{ env.SUFFIX }}.exe
 
   create-release:
     needs: [setup, build-linux, build-macos, build-windows]

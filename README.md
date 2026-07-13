@@ -1,4 +1,4 @@
-# xfer-webrtc
+# secure-send-cli
 
 CLI companion for `secure-send-web`.
 
@@ -7,7 +7,7 @@ protocol support is maintained.
 
 ## What It Does
 
-`xfer-webrtc` sends and receives single files with the same wire formats as
+`secure-send-cli` sends and receives single files with the same wire formats as
 `secure-send-web`:
 
 - Nostr PIN signaling by default, compatible with the web app's Auto Exchange mode.
@@ -28,7 +28,7 @@ binary in your PATH; no runtime dependencies or package managers are required.
 The shell installer supports Linux x86_64/aarch64 and macOS Apple Silicon.
 
 ```bash
-curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash
+curl -sSL https://andrewtheguy.github.io/secure-send-cli/install.sh | bash
 ```
 
 By default the installer pulls the latest **stable** release. Use `--prerelease`
@@ -37,10 +37,10 @@ Examples:
 
 ```bash
 # Latest prerelease
-curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash -s -- --prerelease
+curl -sSL https://andrewtheguy.github.io/secure-send-cli/install.sh | bash -s -- --prerelease
 
 # Pin to a specific tag
-curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash -s <release-tag>
+curl -sSL https://andrewtheguy.github.io/secure-send-cli/install.sh | bash -s <release-tag>
 ```
 
 ### Quick Install (Windows)
@@ -48,19 +48,19 @@ curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash -s <relea
 The Windows installer supports x86_64 (AMD64).
 
 ```powershell
-irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
+irm https://andrewtheguy.github.io/secure-send-cli/install.ps1 | iex
 ```
 
 By default the PowerShell installer pulls the latest **stable** release. Because
 parameter binding is unavailable when piping into `iex`, pass flags via
-`$env:XFER_INSTALL_ARGS`. Examples:
+`$env:SECURE_SEND_CLI_INSTALL_ARGS`. Examples:
 
 ```powershell
 # Latest prerelease
-$env:XFER_INSTALL_ARGS='-PreRelease'; irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
+$env:SECURE_SEND_CLI_INSTALL_ARGS='-PreRelease'; irm https://andrewtheguy.github.io/secure-send-cli/install.ps1 | iex
 
 # Pin to a specific tag
-$env:XFER_INSTALL_ARGS='<release-tag>'; irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
+$env:SECURE_SEND_CLI_INSTALL_ARGS='<release-tag>'; irm https://andrewtheguy.github.io/secure-send-cli/install.ps1 | iex
 ```
 
 ### From Source
@@ -76,20 +76,20 @@ cargo build --release --all-features
 Sender:
 
 ```bash
-xfer-webrtc send /path/to/file
+secure-send-cli send /path/to/file
 ```
 
 The sender prints a 12-character PIN. Enter that PIN in `secure-send-web` or in
 another CLI receiver:
 
 ```bash
-xfer-webrtc receive <PIN>
+secure-send-cli receive <PIN>
 ```
 
 To choose an output directory:
 
 ```bash
-xfer-webrtc receive <PIN> --output /path/to/dir
+secure-send-cli receive <PIN> --output /path/to/dir
 ```
 
 ### Manual SS03 Mode
@@ -97,13 +97,13 @@ xfer-webrtc receive <PIN> --output /path/to/dir
 Sender:
 
 ```bash
-xfer-webrtc send --manual /path/to/file
+secure-send-cli send --manual /path/to/file
 ```
 
 Receiver:
 
 ```bash
-xfer-webrtc receive --manual
+secure-send-cli receive --manual
 ```
 
 The sender prints an offer code. The receiver pastes that offer and prints a

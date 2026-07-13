@@ -104,7 +104,7 @@ pub async fn receive_file_manual(offer_code: &str, output_dir: Option<PathBuf>) 
     );
     let answer_code = manual::encode(&answer_payload)?;
     ui::status("Send this response code back to the sender:");
-    ui::show_code("XFER RESPONSE", &answer_code);
+    ui::show_code("SECURE SEND RESPONSE", &answer_code);
 
     let peer = Arc::new(peer);
 

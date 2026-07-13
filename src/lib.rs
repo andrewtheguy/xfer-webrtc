@@ -1,4 +1,4 @@
-//! xfer-webrtc: CLI companion to secure-send-web for peer-to-peer file transfer.
+//! secure-send-cli: CLI companion to secure-send-web for peer-to-peer file transfer.
 //!
 //! This crate re-implements secure-send-web's crypto and wire formats so files
 //! can be transferred between the CLI and the browser app over a WebRTC data

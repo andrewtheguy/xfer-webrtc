@@ -1,15 +1,15 @@
 [package]
-name = "xfer-webrtc"
+name = "secure-send-cli"
 version = "0.0.8"
 edition = "2024"
 publish = false
 
 [lib]
-name = "xfer_webrtc"
+name = "secure_send_cli"
 path = "src/lib.rs"
 
 [[bin]]
-name = "xfer-webrtc"
+name = "secure-send-cli"
 path = "src/main.rs"
 
 [dependencies]
