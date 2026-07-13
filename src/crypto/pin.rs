@@ -37,6 +37,11 @@ const PIN_CHARSET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// How often the sender mints and publishes a fresh PIN.
 pub const PIN_ROTATION_MS: u64 = 120_000;
+/// Total time the sender keeps rotating/waiting before giving up. A resource
+/// backstop, not a security control: rotation already caps any single PIN's
+/// exposure at [`PIN_TTL_MS`], so waiting longer is not less safe. Mirrors
+/// secure-send-web's `PIN_WAIT_TIMEOUT_MS`.
+pub const PIN_WAIT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 /// How many recent PIN generations the sender honors when verifying a claim.
 pub const PIN_ACTIVE_GENERATIONS: usize = 3;
 /// Resulting validity of any single PIN: bounds rendezvous-event freshness on

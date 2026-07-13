@@ -21,8 +21,8 @@ use crate::crypto::aes;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::ecdh::{EcdhKeyPair, NostrSessionKeys, generate_salt};
 use crate::crypto::pin::{
-    PIN_ACTIVE_GENERATIONS, PIN_ROTATION_MS, PinRoot, format_pin, generate_pin,
-    generate_transfer_id,
+    PIN_ACTIVE_GENERATIONS, PIN_ROTATION_MS, PIN_WAIT_TIMEOUT_MS, PinRoot, format_pin,
+    generate_pin, generate_transfer_id,
 };
 use crate::signaling::nostr::{
     self, CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
@@ -37,11 +37,9 @@ use crate::util::format_bytes;
 use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
 use crate::webrtc::{add_ice_candidate_safely, advertise_max_message_size, candidate_strings};
 
-/// Total time the sender keeps rotating/waiting before giving up. A resource
-/// backstop, not a security control: rotation already caps any single PIN's
-/// exposure at `PIN_TTL_MS`, so waiting longer is not less safe. Mirrors
-/// secure-send-web's `PIN_WAIT_TIMEOUT_MS`.
-const WAIT_FOR_RECEIVER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Total time the sender keeps rotating/waiting before giving up
+/// ([`PIN_WAIT_TIMEOUT_MS`]).
+const WAIT_FOR_RECEIVER_TIMEOUT: Duration = Duration::from_millis(PIN_WAIT_TIMEOUT_MS);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 const OFFER_RETRY_INTERVAL: Duration = Duration::from_secs(5);

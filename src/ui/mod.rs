@@ -173,6 +173,10 @@ pub fn show_pin(file_name: &str, file_size: u64, pin: &str, fingerprint: &str) {
     );
     println!("{pin}");
     eprintln!("PIN fingerprint: {fingerprint} (should match the receiver's)");
+    eprintln!(
+        "(a fresh PIN is printed every {} min)",
+        crate::crypto::pin::PIN_ROTATION_MS / 60_000
+    );
 }
 
 /// Stop displaying the PIN: a receiver claimed the transfer, so every shown

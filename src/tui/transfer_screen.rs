@@ -2,7 +2,7 @@
 //! progress gauge, and the file-exists modal while the transfer task runs.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
@@ -11,9 +11,11 @@ use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::crypto::pin::{PIN_ROTATION_MS, PIN_WAIT_TIMEOUT_MS};
 use crate::ui::{Direction, FileExistsChoice, UiEvent};
 use crate::util::{OnConflict, calc_percent, format_bytes};
 use crate::{archive, ui, webrtc};
@@ -117,6 +119,12 @@ struct State {
     /// entered in the wizard.
     outgoing: Option<String>,
     pin: Option<String>,
+    /// When the displayed PIN was minted; restarts the rotation countdown on
+    /// every [`UiEvent::ShowPin`].
+    pin_shown_at: Option<Instant>,
+    /// When the first PIN appeared: start of the overall wait window, stable
+    /// across rotations.
+    wait_started_at: Option<Instant>,
     fingerprint: Option<String>,
     incoming: Option<String>,
     status_log: Vec<String>,
@@ -140,6 +148,8 @@ impl State {
             title,
             outgoing: None,
             pin: None,
+            pin_shown_at: None,
+            wait_started_at: None,
             fingerprint,
             incoming: None,
             status_log: Vec::new(),
@@ -174,10 +184,14 @@ impl State {
             } => {
                 self.outgoing = Some(format!("{file_name} ({})", format_bytes(size)));
                 self.pin = Some(pin);
+                self.pin_shown_at = Some(Instant::now());
+                self.wait_started_at.get_or_insert_with(Instant::now);
                 self.fingerprint = Some(fingerprint);
             }
             UiEvent::HidePin => {
                 self.pin = None;
+                self.pin_shown_at = None;
+                self.wait_started_at = None;
                 self.fingerprint = None;
             }
             UiEvent::Incoming { file_name, size } => {
@@ -232,7 +246,8 @@ impl State {
             height += 1;
         }
         if self.pin.is_some() {
-            height += 2;
+            // Label, PIN, rotation countdown, wait backstop.
+            height += 4;
         }
         if self.fingerprint.is_some() {
             height += 1;
@@ -244,23 +259,68 @@ impl State {
     }
 
     fn render_panel(&self, f: &mut Frame, area: Rect) {
-        let mut lines = Vec::new();
+        let mut lines: Vec<Line> = Vec::new();
         if let Some(outgoing) = &self.outgoing {
-            lines.push(format!("Sending: {outgoing}"));
+            lines.push(format!("Sending: {outgoing}").bold().into());
         }
         if let Some(pin) = &self.pin {
-            lines.push("Enter this PIN on the receiving side:".to_string());
-            lines.push(format!("  {pin}"));
+            lines.push("Enter this PIN on the receiving side:".bold().into());
+            lines.push(format!("  {pin}").bold().into());
+            lines.push(self.rotation_line());
+            lines.push(self.wait_backstop_line());
         }
         if let Some(fp) = &self.fingerprint {
-            lines.push(format!("PIN fingerprint: {fp} (should match the other side)"));
+            lines.push(
+                format!("PIN fingerprint: {fp} (should match the other side)")
+                    .bold()
+                    .into(),
+            );
         }
         if let Some(incoming) = &self.incoming {
-            lines.push(format!("Incoming file: {incoming}"));
+            lines.push(format!("Incoming file: {incoming}").bold().into());
         }
         if !lines.is_empty() {
-            f.render_widget(Paragraph::new(lines.join("\n")).bold(), area);
+            f.render_widget(Paragraph::new(lines), area);
         }
+    }
+
+    /// Depleting bar plus `New PIN in m:ss`: time until rotation replaces the
+    /// displayed PIN with a fresh one.
+    fn rotation_line(&self) -> Line<'static> {
+        const BAR_WIDTH: usize = 22;
+        let rotation = Duration::from_millis(PIN_ROTATION_MS);
+        let remaining = self
+            .pin_shown_at
+            .map(|shown| rotation.saturating_sub(shown.elapsed()))
+            .unwrap_or(rotation);
+        let filled = ((remaining.as_secs_f64() / rotation.as_secs_f64()) * BAR_WIDTH as f64)
+            .round() as usize;
+        let secs = remaining.as_secs();
+        Line::from(vec![
+            "  ".into(),
+            "█".repeat(filled.min(BAR_WIDTH)).yellow(),
+            "░".repeat(BAR_WIDTH.saturating_sub(filled)).dim(),
+            format!("  New PIN in {}:{:02}", secs / 60, secs % 60).into(),
+            " (r: new PIN now)".dim(),
+        ])
+    }
+
+    /// Quiet resource backstop, not a security deadline: rotation already caps
+    /// each PIN's life, so there is no urgency to surface here.
+    fn wait_backstop_line(&self) -> Line<'static> {
+        let timeout = Duration::from_millis(PIN_WAIT_TIMEOUT_MS);
+        let remaining = self
+            .wait_started_at
+            .map(|start| timeout.saturating_sub(start.elapsed()))
+            .unwrap_or(timeout);
+        let when = if remaining.as_secs() >= 60 {
+            format!("in about {} min", remaining.as_secs().div_ceil(60))
+        } else {
+            "in less than a minute".to_string()
+        };
+        format!("Waiting stops automatically {when} if no one connects.")
+            .dim()
+            .into()
     }
 
     /// History is dimmed; only the current (last) line renders at full
