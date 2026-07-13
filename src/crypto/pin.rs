@@ -57,8 +57,8 @@ const PIN_HKDF_SALT: &str = "secure-send:pin:v2";
 
 /// PIN hint length in hex characters (64 bits): the Nostr `#h` filter tag.
 const PIN_HINT_LENGTH: usize = 16;
-/// PIN fingerprint length in uppercase base32 characters (40 bits, local-only).
-const PIN_FINGERPRINT_LENGTH: usize = 8;
+/// PIN fingerprint length in lowercase hex characters (48 bits, local-only).
+const PIN_FINGERPRINT_LENGTH: usize = 12;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -244,13 +244,11 @@ impl PinRoot {
     /// sides so two humans can visually confirm they entered the same PIN.
     /// Never published to relays, so it carries no rotation-bucket scoping.
     ///
-    /// Encoded as 8 uppercase base32 chars (RFC 4648, the Tor v3 `.onion`
-    /// alphabet A–Z2–7) to avoid ambiguous glyphs.
+    /// Encoded as 12 lowercase hex chars, displayed as-is (no grouping).
     pub fn fingerprint(&self) -> String {
-        // 5 bits per base32 char; div_ceil covers a non-multiple-of-8 bit width.
-        let mut bytes = vec![0u8; (PIN_FINGERPRINT_LENGTH * 5).div_ceil(8)];
+        let mut bytes = vec![0u8; PIN_FINGERPRINT_LENGTH.div_ceil(2)];
         self.expand("fingerprint", &mut bytes);
-        base32_upper(&bytes)[..PIN_FINGERPRINT_LENGTH].to_string()
+        hex_lower(&bytes)[..PIN_FINGERPRINT_LENGTH].to_string()
     }
 }
 
@@ -259,45 +257,12 @@ fn current_rotation_bucket() -> u64 {
     now_ms() / PIN_ROTATION_MS
 }
 
-/// Format a PIN fingerprint for display: grouped into 4-char blocks
-/// (e.g. `ABCD-EF23`). Mirrors secure-send-web's `formatPinHint`.
-pub fn format_pin_fingerprint(fingerprint: &str) -> String {
-    let upper = fingerprint.to_uppercase();
-    upper
-        .as_bytes()
-        .chunks(4)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push(HEX[(byte >> 4) as usize] as char);
         out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-/// Encode bytes as unpadded uppercase base32 (RFC 4648), 5 bits per output
-/// char. Mirrors secure-send-web's `toBase32`.
-fn base32_upper(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut value: u32 = 0;
-    let mut bits = 0u32;
-    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
-    for byte in bytes {
-        value = (value << 8) | u32::from(*byte);
-        bits += 8;
-        while bits >= 5 {
-            out.push(ALPHABET[((value >> (bits - 5)) & 31) as usize] as char);
-            bits -= 5;
-        }
-    }
-    if bits > 0 {
-        out.push(ALPHABET[((value << (5 - bits)) & 31) as usize] as char);
     }
     out
 }
@@ -365,7 +330,6 @@ mod tests {
             hex_lower(&root.rendezvous_key()),
             "7f9f1f01b4db42c33120fc470ecc77100ce6015bcfa6aac7cc4abd346769d2f9"
         );
-        assert_eq!(root.fingerprint(), "N62NQZE5");
-        assert_eq!(format_pin_fingerprint(&root.fingerprint()), "N62N-QZE5");
+        assert_eq!(root.fingerprint(), "6fb4d8649db3");
     }
 }

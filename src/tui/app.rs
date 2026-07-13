@@ -11,9 +11,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::Paragraph;
 
-use crate::crypto::pin::{
-    PIN_LENGTH, PinRoot, canonical_pin_char, format_pin, format_pin_fingerprint, is_valid_pin,
-};
+use crate::crypto::pin::{PIN_LENGTH, PinRoot, canonical_pin_char, format_pin, is_valid_pin};
 
 use super::dir_picker::{DirPicker, DirPickerStep};
 use super::file_browser::{Browser, BrowserStep};
@@ -29,7 +27,7 @@ pub enum WizardPlan {
     /// Stays in the TUI.
     ReceiveNostr {
         pin: String,
-        /// Formatted fingerprint of `pin`, computed during entry so the
+        /// Fingerprint of `pin`, computed during entry so the
         /// transfer screen doesn't redo the PBKDF2 stretch.
         fingerprint: String,
         output: PathBuf,
@@ -264,9 +262,9 @@ fn pin_entry_key(
     }
 }
 
-/// Formatted fingerprint of a complete, valid PIN (blocking PBKDF2 stretch).
+/// Fingerprint of a complete, valid PIN (blocking PBKDF2 stretch).
 fn pin_fingerprint(pin: &str) -> String {
-    format_pin_fingerprint(&PinRoot::derive(pin).fingerprint())
+    PinRoot::derive(pin).fingerprint()
 }
 
 fn draw(f: &mut Frame, screen: &mut Screen) {
