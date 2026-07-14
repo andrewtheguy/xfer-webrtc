@@ -165,8 +165,8 @@ mod tests {
 
     #[test]
     fn test_send_takes_multiple_paths() {
-        let cli = Cli::try_parse_from(["secure-send-cli", "test", "send", "a.txt", "b", "dir"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["secure-send-cli", "test", "send", "a.txt", "b", "dir"]).unwrap();
         let Some(Commands::Test {
             command: TestCommands::Send { paths, manual },
             ..

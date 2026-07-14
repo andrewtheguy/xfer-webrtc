@@ -96,7 +96,10 @@ impl EcdhKeyPair {
     /// per-purpose keys expand from.
     fn shared_secret_hkdf(&self, peer_public_key: &[u8], salt: &[u8]) -> Result<Hkdf<Sha256>> {
         if salt.len() < SALT_LEN {
-            bail!("salt too short: expected at least {SALT_LEN} bytes, got {}", salt.len());
+            bail!(
+                "salt too short: expected at least {SALT_LEN} bytes, got {}",
+                salt.len()
+            );
         }
         let peer = import_public_key(peer_public_key)?;
 
@@ -147,12 +150,8 @@ mod tests {
         let bob = EcdhKeyPair::generate().unwrap();
         let salt = generate_salt().unwrap();
 
-        let ka = alice
-            .derive_aes_key(&bob.public_key_bytes, &salt)
-            .unwrap();
-        let kb = bob
-            .derive_aes_key(&alice.public_key_bytes, &salt)
-            .unwrap();
+        let ka = alice.derive_aes_key(&bob.public_key_bytes, &salt).unwrap();
+        let kb = bob.derive_aes_key(&alice.public_key_bytes, &salt).unwrap();
         assert_eq!(ka, kb);
     }
 
@@ -160,8 +159,12 @@ mod tests {
     fn different_salt_differs() {
         let alice = EcdhKeyPair::generate().unwrap();
         let bob = EcdhKeyPair::generate().unwrap();
-        let k1 = alice.derive_aes_key(&bob.public_key_bytes, &[9u8; 16]).unwrap();
-        let k2 = alice.derive_aes_key(&bob.public_key_bytes, &[8u8; 16]).unwrap();
+        let k1 = alice
+            .derive_aes_key(&bob.public_key_bytes, &[9u8; 16])
+            .unwrap();
+        let k2 = alice
+            .derive_aes_key(&bob.public_key_bytes, &[8u8; 16])
+            .unwrap();
         assert_ne!(k1, k2);
     }
 
@@ -203,9 +206,7 @@ mod tests {
     fn hex_bytes(hex: &str) -> Vec<u8> {
         hex.as_bytes()
             .chunks(2)
-            .map(|pair| {
-                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
-            })
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
     }
 

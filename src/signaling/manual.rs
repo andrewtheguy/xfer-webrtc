@@ -112,7 +112,10 @@ impl SignalingPayload {
 
     fn validate(&self) -> Result<()> {
         if self.payload_type != "offer" && self.payload_type != "answer" {
-            bail!("invalid signaling payload: unknown type {:?}", self.payload_type);
+            bail!(
+                "invalid signaling payload: unknown type {:?}",
+                self.payload_type
+            );
         }
         if self.public_key.len() != PUBLIC_KEY_LEN {
             bail!(

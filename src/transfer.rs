@@ -199,8 +199,8 @@ pub async fn run_receiver(
 
             if msg.is_string {
                 let text = String::from_utf8_lossy(&msg.data);
-                let (final_chunks, final_bytes) = parse_done(&text)
-                    .with_context(|| format!("invalid DONE message: {text:?}"))?;
+                let (final_chunks, final_bytes) =
+                    parse_done(&text).with_context(|| format!("invalid DONE message: {text:?}"))?;
                 if final_chunks != received_count {
                     bail!(
                         "sender reported {final_chunks} chunks after {received_count} were received"
@@ -237,7 +237,10 @@ pub async fn run_receiver(
                 if received[index as usize] {
                     bail!("duplicate chunk index {index}");
                 }
-                plaintext_len(index_u64, total_bytes.context("missing exact transfer size")?)
+                plaintext_len(
+                    index_u64,
+                    total_bytes.context("missing exact transfer size")?,
+                )
             } else {
                 // Unknown-size transfers append, so require the reliable data
                 // channel's default ordering and full chunks before the last.
@@ -341,9 +344,7 @@ fn parse_done(message: &str) -> Result<(u64, u64)> {
     let values = message
         .strip_prefix("DONE:")
         .context("missing DONE prefix")?;
-    let (chunks, bytes) = values
-        .split_once(':')
-        .context("missing final byte count")?;
+    let (chunks, bytes) = values.split_once(':').context("missing final byte count")?;
     if chunks.is_empty()
         || bytes.is_empty()
         || !chunks.bytes().all(|byte| byte.is_ascii_digit())

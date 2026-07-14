@@ -42,8 +42,7 @@ pub async fn run() -> Result<()> {
         WizardPlan::SendManual(paths) => {
             drop(guard); // back to the normal terminal for the code swap
             let source =
-                tokio::task::spawn_blocking(move || archive::prepare_send_source(&paths))
-                    .await??;
+                tokio::task::spawn_blocking(move || archive::prepare_send_source(&paths)).await??;
             webrtc::send_file_manual(&source).await
         }
 
@@ -57,7 +56,8 @@ pub async fn run() -> Result<()> {
 
 /// Raw mode disables signal handling, so Ctrl-C arrives as a key event.
 fn is_ctrl_c(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == crossterm::event::KeyCode::Char('c')
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == crossterm::event::KeyCode::Char('c')
 }
 
 /// Restores the terminal on drop (early `?` returns, clean exits) in addition

@@ -87,8 +87,8 @@ impl SendSource {
                 let (sender, receiver) = mpsc::channel(2);
                 let error_sender = sender.clone();
                 let task = tokio::task::spawn_blocking(move || {
-                    let result = write_zip(&entries, ChunkWriter::new(sender))
-                        .and_then(ChunkWriter::finish);
+                    let result =
+                        write_zip(&entries, ChunkWriter::new(sender)).and_then(ChunkWriter::finish);
                     if let Err(error) = &result {
                         let _ = error_sender.blocking_send(Err(format!("{error:#}")));
                     }
@@ -152,8 +152,8 @@ fn prepare_send_source_with_cap(inputs: &[PathBuf], cap: u64) -> Result<SendSour
     }
 
     if let [single] = inputs {
-        let metadata = fs::metadata(single)
-            .with_context(|| format!("Cannot read {}", single.display()))?;
+        let metadata =
+            fs::metadata(single).with_context(|| format!("Cannot read {}", single.display()))?;
         if metadata.is_file() {
             return single_file_source(single, metadata.len(), cap);
         }
@@ -243,8 +243,8 @@ fn plan_entries(inputs: &[PathBuf]) -> Result<(Vec<(String, PathBuf)>, String)> 
     let mut file_count = 0usize;
 
     for input in inputs {
-        let metadata = fs::metadata(input)
-            .with_context(|| format!("Cannot read {}", input.display()))?;
+        let metadata =
+            fs::metadata(input).with_context(|| format!("Cannot read {}", input.display()))?;
         if metadata.is_dir() {
             let name = input_name(input)?;
             collect_dir(input, &name, &mut entries)?;
@@ -382,10 +382,8 @@ impl Write for ChunkWriter {
             self.chunk.extend_from_slice(&input[..copied]);
             input = &input[copied..];
             if self.chunk.len() == ENCRYPTION_CHUNK_SIZE {
-                let chunk = std::mem::replace(
-                    &mut self.chunk,
-                    Vec::with_capacity(ENCRYPTION_CHUNK_SIZE),
-                );
+                let chunk =
+                    std::mem::replace(&mut self.chunk, Vec::with_capacity(ENCRYPTION_CHUNK_SIZE));
                 self.send_chunk(chunk)?;
             }
         }
@@ -425,7 +423,10 @@ mod tests {
             .and_then(|rest| rest.strip_suffix(".zip"))
             .unwrap_or_else(|| panic!("unexpected archive name: {name}"));
         assert_eq!(stamp.len(), 14, "unexpected timestamp in {name}");
-        assert!(stamp.bytes().all(|b| b.is_ascii_digit()), "unexpected timestamp in {name}");
+        assert!(
+            stamp.bytes().all(|b| b.is_ascii_digit()),
+            "unexpected timestamp in {name}"
+        );
     }
 
     #[test]
@@ -518,11 +519,8 @@ mod tests {
             dir.path().join("root/link.txt"),
         )
         .unwrap();
-        std::os::unix::fs::symlink(
-            dir.path().join("elsewhere"),
-            dir.path().join("root/loop"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(dir.path().join("elsewhere"), dir.path().join("root/loop"))
+            .unwrap();
         let (entries, _) = plan_entries(&[dir.path().join("root")]).unwrap();
         assert_eq!(keys(&entries), ["root/link.txt", "root/real.txt"]);
     }
@@ -538,10 +536,7 @@ mod tests {
         assert_stamped_name(&source.file_name, "bundle");
         assert_eq!(source.mime_type, "application/zip");
         assert_eq!(source.file_size, None);
-        assert_eq!(
-            source.estimated_size,
-            (a_data.len() + b_data.len()) as u64
-        );
+        assert_eq!(source.estimated_size, (a_data.len() + b_data.len()) as u64);
         assert!(source.estimated_size > (ENCRYPTION_CHUNK_SIZE * 3) as u64);
         assert!(!source.size_is_exact());
 
@@ -585,9 +580,11 @@ mod tests {
             chunks.push(chunk);
         }
         assert!(chunks.len() > 3);
-        assert!(chunks[..chunks.len() - 1]
-            .iter()
-            .all(|chunk| chunk.len() == ENCRYPTION_CHUNK_SIZE));
+        assert!(
+            chunks[..chunks.len() - 1]
+                .iter()
+                .all(|chunk| chunk.len() == ENCRYPTION_CHUNK_SIZE)
+        );
         assert!(!chunks.last().unwrap().is_empty());
         assert!(chunks.last().unwrap().len() <= ENCRYPTION_CHUNK_SIZE);
 
@@ -662,7 +659,10 @@ mod tests {
         let file = write(dir.path(), "solo.txt", "s");
         write(dir.path(), "photos/p.jpg", "p");
         assert_eq!(send_display_name(std::slice::from_ref(&file)), "solo.txt");
-        assert_eq!(send_display_name(&[dir.path().join("photos")]), "photos.zip");
+        assert_eq!(
+            send_display_name(&[dir.path().join("photos")]),
+            "photos.zip"
+        );
         assert_eq!(
             send_display_name(&[file, dir.path().join("photos")]),
             "files.zip"

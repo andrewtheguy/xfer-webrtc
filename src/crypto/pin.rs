@@ -155,7 +155,9 @@ fn normalize_pin_char(c: char) -> Option<char> {
 /// of a PIN (including separators, which the TUI simply ignores).
 pub fn canonical_pin_char(c: char) -> Option<char> {
     let canonical = normalize_pin_char(c)?;
-    PIN_CHARSET.contains(&(canonical as u8)).then_some(canonical)
+    PIN_CHARSET
+        .contains(&(canonical as u8))
+        .then_some(canonical)
 }
 
 /// Format a PIN for display as symmetric groups (`XXXXX-XXXXX`). Also groups
@@ -251,7 +253,6 @@ impl PinRoot {
     pub fn rendezvous_key(&self) -> [u8; AES_KEY_LEN] {
         self.aes_key("rendezvous")
     }
-
 }
 
 /// The PIN fingerprint: a stable one-way derivation displayed to both sides

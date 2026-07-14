@@ -268,8 +268,8 @@ fn pin_entry_key(
         error = None;
         // Shown for the visual check against the sender's fingerprint before
         // Enter confirms.
-        fingerprint = (input.len() == PIN_LENGTH && is_valid_pin(&input))
-            .then(|| pin_fingerprint(&input));
+        fingerprint =
+            (input.len() == PIN_LENGTH && is_valid_pin(&input)).then(|| pin_fingerprint(&input));
     }
 
     Step::Continue(Screen::PinEntry {
@@ -353,7 +353,10 @@ fn draw(f: &mut Frame, screen: &mut Screen) {
                 Constraint::Fill(1),
             ])
             .areas(area);
-            f.render_widget(Paragraph::new("How is the sender sharing the transfer?"), title);
+            f.render_widget(
+                Paragraph::new("How is the sender sharing the transfer?"),
+                title,
+            );
             widgets::menu(f, list, MODE_ITEMS, *selected);
             widgets::key_hints(f, inner, "↑/↓ move · Enter select · Esc back");
         }
@@ -383,16 +386,20 @@ fn draw(f: &mut Frame, screen: &mut Screen) {
                 title,
             );
             let display = format_pin(input);
-            widgets::input_line(f, line, "PIN: ", &display, display_cursor(&display, *cursor));
+            widgets::input_line(
+                f,
+                line,
+                "PIN: ",
+                &display,
+                display_cursor(&display, *cursor),
+            );
             if let Some(error) = error {
                 widgets::error_line(f, extra, error);
             } else if let Some(fp) = fingerprint {
                 // Dimmed so the hex fingerprint is never mistaken for the PIN.
                 f.render_widget(
-                    Paragraph::new(format!(
-                        "PIN fingerprint: {fp} (should match the sender's)"
-                    ))
-                    .dim(),
+                    Paragraph::new(format!("PIN fingerprint: {fp} (should match the sender's)"))
+                        .dim(),
                     extra,
                 );
             }

@@ -97,8 +97,7 @@ async fn run_plan(plan: WizardPlan) -> Result<()> {
     match plan {
         WizardPlan::SendNostr(paths) => {
             let source =
-                tokio::task::spawn_blocking(move || archive::prepare_send_source(&paths))
-                    .await??;
+                tokio::task::spawn_blocking(move || archive::prepare_send_source(&paths)).await??;
             webrtc::send_file_nostr(&source).await
         }
         WizardPlan::ReceiveNostr { pin, output, .. } => {
@@ -296,8 +295,8 @@ impl State {
             .pin_shown_at
             .map(|shown| rotation.saturating_sub(shown.elapsed()))
             .unwrap_or(rotation);
-        let filled = ((remaining.as_secs_f64() / rotation.as_secs_f64()) * BAR_WIDTH as f64)
-            .round() as usize;
+        let filled = ((remaining.as_secs_f64() / rotation.as_secs_f64()) * BAR_WIDTH as f64).round()
+            as usize;
         let secs = remaining.as_secs();
         Line::from(vec![
             "█".repeat(filled.min(BAR_WIDTH)).yellow(),
@@ -366,7 +365,9 @@ impl State {
     fn render_modal(&self, f: &mut Frame, inner: Rect, path: &std::path::Path) {
         let area = widgets::centered(inner, inner.width.saturating_sub(8).max(30), 5);
         f.render_widget(Clear, area);
-        let block = Block::default().borders(Borders::ALL).title(" File exists ");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" File exists ");
         let body = block.inner(area);
         f.render_widget(block, area);
         f.render_widget(

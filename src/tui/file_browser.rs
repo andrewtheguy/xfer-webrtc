@@ -70,14 +70,18 @@ impl Browser {
                 continue;
             }
             let path = dir_entry.path();
-            let is_dir = dir_entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                || (path.is_dir()); // resolve symlinked dirs for navigation
+            let is_dir =
+                dir_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) || (path.is_dir()); // resolve symlinked dirs for navigation
             self.entries.push(Entry { name, path, is_dir });
         }
-        self.entries
-            .sort_by(|a, b| (!a.is_dir, a.name.to_lowercase()).cmp(&(!b.is_dir, b.name.to_lowercase())));
-        self.list_state
-            .select(if self.entries.is_empty() { None } else { Some(0) });
+        self.entries.sort_by(|a, b| {
+            (!a.is_dir, a.name.to_lowercase()).cmp(&(!b.is_dir, b.name.to_lowercase()))
+        });
+        self.list_state.select(if self.entries.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
     }
 
     fn cursor_entry(&self) -> Option<&Entry> {
@@ -166,8 +170,8 @@ impl Browser {
                     }
                 })
                 .collect();
-            let list = List::new(items)
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            let list =
+                List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
             f.render_stateful_widget(list, list_area, &mut self.list_state);
         }
 
@@ -180,11 +184,7 @@ impl Browser {
                 send_display_name(&self.selection())
             )
         };
-        let hints =
-            "↑/↓ move · Enter open · ←/Backspace up · Space select · . hidden · Tab confirm · Esc back";
-        f.render_widget(
-            Paragraph::new(format!("{summary}\n{hints}")).dim(),
-            footer,
-        );
+        let hints = "↑/↓ move · Enter open · ←/Backspace up · Space select · . hidden · Tab confirm · Esc back";
+        f.render_widget(Paragraph::new(format!("{summary}\n{hints}")).dim(), footer);
     }
 }

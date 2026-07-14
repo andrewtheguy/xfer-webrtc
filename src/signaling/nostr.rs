@@ -287,7 +287,10 @@ pub fn rendezvous_kind() -> Kind {
 }
 
 pub fn default_relays_vec() -> Vec<String> {
-    DEFAULT_RELAYS.iter().map(|relay| (*relay).to_string()).collect()
+    DEFAULT_RELAYS
+        .iter()
+        .map(|relay| (*relay).to_string())
+        .collect()
 }
 
 /// Generate a random handshake nonce (16 bytes, base64). The sender mints one
@@ -321,9 +324,7 @@ pub fn create_rendezvous_event(
         tag("expiration", expiration.to_string())?,
     ];
 
-    client.sign(
-        EventBuilder::new(rendezvous_kind(), STANDARD.encode(encrypted_payload)).tags(tags),
-    )
+    client.sign(EventBuilder::new(rendezvous_kind(), STANDARD.encode(encrypted_payload)).tags(tags))
 }
 
 /// Parse a rendezvous event into `(hint, salt, transfer_id, encrypted_payload)`.
@@ -456,7 +457,10 @@ pub fn parse_signal_event(
 pub fn rendezvous_filter(hints: &[String]) -> Filter {
     Filter::new()
         .kind(rendezvous_kind())
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), hints.iter().cloned())
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            hints.iter().cloned(),
+        )
         .limit(10)
 }
 
@@ -540,7 +544,10 @@ mod tests {
         let value = serde_json::to_value(signal_filter_from_sender("transfer-id", sender))
             .expect("filter json");
 
-        assert_eq!(value["kinds"], serde_json::json!([EVENT_KIND_DATA_TRANSFER]));
+        assert_eq!(
+            value["kinds"],
+            serde_json::json!([EVENT_KIND_DATA_TRANSFER])
+        );
         assert_eq!(value["#t"], serde_json::json!(["transfer-id"]));
         assert_eq!(value["authors"], serde_json::json!([sender.to_hex()]));
         assert!(value.get("#p").is_none());
@@ -550,9 +557,8 @@ mod tests {
     fn rendezvous_event_round_trips_and_matches_web_shape() {
         let (client, _) = test_client();
         let salt = [9u8; 16];
-        let event =
-            create_rendezvous_event(&client, b"sealed", &salt, "transfer-id", "aabbccdd")
-                .expect("rendezvous event");
+        let event = create_rendezvous_event(&client, b"sealed", &salt, "transfer-id", "aabbccdd")
+            .expect("rendezvous event");
 
         assert_eq!(event.kind.as_u16(), EVENT_KIND_RENDEZVOUS);
         assert_eq!(tag_value(&event, "type"), Some("rendezvous"));

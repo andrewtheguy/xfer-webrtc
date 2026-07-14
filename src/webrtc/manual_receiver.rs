@@ -52,7 +52,10 @@ pub async fn receive_file_manual(
         .mime_type
         .clone()
         .context("Offer is missing the MIME type")?;
-    let salt = offer.salt.clone().context("Offer is missing the encryption salt")?;
+    let salt = offer
+        .salt
+        .clone()
+        .context("Offer is missing the encryption salt")?;
 
     if file_size_exact && file_size == 0 {
         bail!("Offer describes an empty file");
@@ -86,8 +89,7 @@ pub async fn receive_file_manual(
         .take_data_channel_rx()
         .context("Data channel receiver already taken")?;
 
-    let offer_sdp =
-        RTCSessionDescription::offer(offer.sdp.clone()).context("Invalid offer SDP")?;
+    let offer_sdp = RTCSessionDescription::offer(offer.sdp.clone()).context("Invalid offer SDP")?;
     peer.set_remote_description(offer_sdp).await?;
     for candidate in &offer.candidates {
         peer.add_ice_candidate(candidate_init(candidate)).await?;

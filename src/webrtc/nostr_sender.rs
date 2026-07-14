@@ -26,9 +26,8 @@ use crate::crypto::pin::{
 use crate::signaling::nostr::{
     self, CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
     RendezvousPayload, Signal, addressed_filter, addressed_filter_from_author,
-    create_handshake_event, create_rendezvous_event, create_signal_event,
-    generate_handshake_nonce, open_handshake_payload, parse_handshake_event, parse_signal_event,
-    seal_handshake_payload,
+    create_handshake_event, create_rendezvous_event, create_signal_event, generate_handshake_nonce,
+    open_handshake_payload, parse_handshake_event, parse_signal_event, seal_handshake_payload,
 };
 use crate::transfer::run_sender;
 use crate::ui;
@@ -432,10 +431,9 @@ fn verify_claim(
     }
 
     for generation in generations {
-        let Ok(payload) = open_handshake_payload::<ClaimPayload>(
-            &generation.auth_key,
-            &handshake.sealed_payload,
-        ) else {
+        let Ok(payload) =
+            open_handshake_payload::<ClaimPayload>(&generation.auth_key, &handshake.sealed_payload)
+        else {
             continue; // Sealed with a different PIN/generation
         };
 

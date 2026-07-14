@@ -41,7 +41,11 @@ pub enum UiEvent {
     /// Completion of the most recent [`UiEvent::Status`] step ("Doing X..." →
     /// "Did X (elapsed)"); the TUI replaces that line instead of appending.
     StatusDone(String),
-    Progress { dir: Direction, bytes: u64, total: u64 },
+    Progress {
+        dir: Direction,
+        bytes: u64,
+        total: u64,
+    },
     ProgressEnd,
     ShowPin {
         file_name: String,
@@ -52,8 +56,14 @@ pub enum UiEvent {
     /// The PIN is no longer valid (a receiver claimed the transfer); stop
     /// displaying it.
     HidePin,
-    Incoming { file_name: String, size: u64 },
-    FileExists { path: PathBuf, reply: oneshot::Sender<FileExistsChoice> },
+    Incoming {
+        file_name: String,
+        size: u64,
+    },
+    FileExists {
+        path: PathBuf,
+        reply: oneshot::Sender<FileExistsChoice>,
+    },
 }
 
 static TUI_SINK: OnceLock<mpsc::UnboundedSender<UiEvent>> = OnceLock::new();
@@ -251,7 +261,10 @@ pub async fn prompt_code(prompt: &str) -> Result<String> {
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 
     let mut collected = loop {
-        let line = lines.next_line().await?.ok_or_else(|| anyhow!("no code entered"))?;
+        let line = lines
+            .next_line()
+            .await?
+            .ok_or_else(|| anyhow!("no code entered"))?;
         let line = line.trim();
         if !line.is_empty() {
             break line.to_string();
@@ -260,8 +273,7 @@ pub async fn prompt_code(prompt: &str) -> Result<String> {
     };
 
     const PASTE_DRAIN_WINDOW: Duration = Duration::from_millis(80);
-    while let Ok(Ok(Some(line))) =
-        tokio::time::timeout(PASTE_DRAIN_WINDOW, lines.next_line()).await
+    while let Ok(Ok(Some(line))) = tokio::time::timeout(PASTE_DRAIN_WINDOW, lines.next_line()).await
     {
         collected.push_str(line.trim());
     }

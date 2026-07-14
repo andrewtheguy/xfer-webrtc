@@ -24,11 +24,11 @@ use crate::crypto::pin::{
     pin_fingerprint,
 };
 use crate::signaling::nostr::{
-    CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
-    RendezvousPayload, Signal, addressed_filter_from_author, create_handshake_event,
-    create_signal_event, generate_handshake_nonce, open_handshake_payload,
-    parse_handshake_event, parse_rendezvous_event, parse_signal_event, rendezvous_filter,
-    seal_handshake_payload, signal_filter_from_sender,
+    CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient, RendezvousPayload,
+    Signal, addressed_filter_from_author, create_handshake_event, create_signal_event,
+    generate_handshake_nonce, open_handshake_payload, parse_handshake_event,
+    parse_rendezvous_event, parse_signal_event, rendezvous_filter, seal_handshake_payload,
+    signal_filter_from_sender,
 };
 use crate::transfer::run_receiver;
 use crate::ui;
@@ -408,8 +408,7 @@ async fn find_rendezvous_event(
             continue;
         };
 
-        let Some(sender_ecdh_public_key) = decode_ecdh_public_key(&payload.ecdh_public_key)
-        else {
+        let Some(sender_ecdh_public_key) = decode_ecdh_public_key(&payload.ecdh_public_key) else {
             continue;
         };
         if payload.payload_type != "rendezvous"

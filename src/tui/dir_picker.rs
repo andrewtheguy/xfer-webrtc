@@ -74,8 +74,11 @@ impl DirPicker {
             }
             Err(e) => self.error = Some(format!("Cannot read {}: {e}", self.cwd.display())),
         }
-        self.list_state
-            .select(if self.entries.is_empty() { None } else { Some(0) });
+        self.list_state.select(if self.entries.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> DirPickerStep {
@@ -203,8 +206,8 @@ impl DirPicker {
                         .style(Style::default().add_modifier(Modifier::BOLD))
                 })
                 .collect();
-            let list = List::new(items)
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            let list =
+                List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
             f.render_stateful_widget(list, list_area, &mut self.list_state);
         }
 
@@ -220,10 +223,7 @@ impl DirPicker {
             if let Some(error) = &self.error {
                 widgets::error_line(f, summary_row, error);
             }
-            f.render_widget(
-                Paragraph::new("Enter create · Esc cancel").dim(),
-                hint_row,
-            );
+            f.render_widget(Paragraph::new("Enter create · Esc cancel").dim(), hint_row);
         } else {
             f.render_widget(
                 Paragraph::new(format!("Save into: {}", self.cwd.display())),

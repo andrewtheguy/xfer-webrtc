@@ -89,8 +89,7 @@ pub async fn send_file_manual(source: &SendSource) -> Result<()> {
     let key = ecdh.derive_aes_key(&answer.public_key, &salt)?;
 
     // Apply the answer.
-    let answer_sdp =
-        RTCSessionDescription::answer(answer.sdp).context("Invalid answer SDP")?;
+    let answer_sdp = RTCSessionDescription::answer(answer.sdp).context("Invalid answer SDP")?;
     peer.set_remote_description(answer_sdp).await?;
     for candidate in &answer.candidates {
         peer.add_ice_candidate(candidate_init(candidate)).await?;
