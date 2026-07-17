@@ -1,5 +1,6 @@
 [package]
 name = "secure-send-cli"
+# does not have to match secure-send-web's npm version
 version = "0.0.11"
 edition = "2024"
 publish = false
