@@ -353,17 +353,17 @@ impl WebRtcPeer {
         // Second pass: get candidate details
         for (id, report) in &stats.reports {
             match report {
-                StatsReportType::LocalCandidate(candidate) => {
-                    if nominated_pair_local_id.as_ref() == Some(id) {
-                        local_candidate_type = Some(candidate.candidate_type);
-                        local_address = Some(format!("{}:{}", candidate.ip, candidate.port));
-                    }
+                StatsReportType::LocalCandidate(candidate)
+                    if nominated_pair_local_id.as_ref() == Some(id) =>
+                {
+                    local_candidate_type = Some(candidate.candidate_type);
+                    local_address = Some(format!("{}:{}", candidate.ip, candidate.port));
                 }
-                StatsReportType::RemoteCandidate(candidate) => {
-                    if nominated_pair_remote_id.as_ref() == Some(id) {
-                        remote_candidate_type = Some(candidate.candidate_type);
-                        remote_address = Some(format!("{}:{}", candidate.ip, candidate.port));
-                    }
+                StatsReportType::RemoteCandidate(candidate)
+                    if nominated_pair_remote_id.as_ref() == Some(id) =>
+                {
+                    remote_candidate_type = Some(candidate.candidate_type);
+                    remote_address = Some(format!("{}:{}", candidate.ip, candidate.port));
                 }
                 _ => {}
             }
