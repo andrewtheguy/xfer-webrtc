@@ -28,8 +28,13 @@ use crate::webrtc::common::DcMessenger;
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle/stall window for active P2P transfer activity.
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
-/// SCTP send-buffer high-water mark for backpressure (matches web's 1 MiB).
-const MAX_BUFFERED: usize = 1024 * 1024;
+/// SCTP send-buffer high-water mark for backpressure.
+///
+/// webrtc-sctp 0.17 uses a 1 MiB receive window. Keep the application queue
+/// well below that window so a fragmented 128 KiB message can be recovered
+/// after packet loss or reordering instead of filling the peer's entire
+/// receive window with later ordered messages.
+const MAX_BUFFERED: usize = 256 * 1024;
 /// The chunk index is a 2-byte big-endian field, so valid totals are 0..=65536.
 const MAX_CHUNKS: u64 = 0x10000;
 
