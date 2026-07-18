@@ -28,8 +28,24 @@ use crate::webrtc::common::DcMessenger;
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle/stall window for active P2P transfer activity.
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
-/// SCTP send-buffer high-water mark for backpressure (matches web's 1 MiB).
-const MAX_BUFFERED: usize = 1024 * 1024;
+/// Send-side backpressure high-water mark, deliberately kept well below the
+/// peer's SCTP receive buffer.
+///
+/// The `webrtc` crate hardcodes a 1 MiB SCTP receive buffer
+/// (`INITIAL_RECV_BUF_SIZE`) and — unlike a browser's usrsctp — never emits a
+/// proactive window-update SACK when the application drains it: the advertised
+/// receive window only refreshes on a SACK, and SACKs are only sent in response
+/// to incoming DATA. So once two webrtc-rs peers let that 1 MiB window fill (it
+/// can fill with a *partially delivered* 128 KiB chunk), the sender's window
+/// closes to zero and the only recovery is the T3-rtx zero-window probe, whose
+/// exponential backoff stalls the transfer (CLI↔CLI hangs; CLI↔browser is fine
+/// because the browser reopens its window on read).
+///
+/// Capping outstanding data at 512 KiB — roughly half the peer's 1 MiB window,
+/// leaving several chunks of headroom — means the receive window never reaches
+/// zero, so we never rely on that fragile recovery path. The web app can use a
+/// full 1 MiB high-water mark because browsers reopen the window on read.
+const MAX_BUFFERED: usize = 512 * 1024;
 /// The chunk index is a 2-byte big-endian field, so valid totals are 0..=65536.
 const MAX_CHUNKS: u64 = 0x10000;
 
