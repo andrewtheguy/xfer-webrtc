@@ -152,7 +152,7 @@ impl WebRtcPeer {
             .context("Failed to serialize local ICE candidate")?;
 
         let mut candidates = vec![host_candidate];
-        if let Some((mapped_addr, stun_server)) = gather_server_reflexive_candidate(&socket).await {
+        for (mapped_addr, stun_server) in gather_server_reflexive_candidates(&socket).await {
             let candidate = CandidateServerReflexiveConfig {
                 base_config: CandidateConfig {
                     network: "udp".to_owned(),
@@ -171,7 +171,12 @@ impl WebRtcPeer {
                 .to_json()
                 .context("Failed to serialize server-reflexive ICE candidate")?;
             candidate.url = Some(format!("stun:{stun_server}"));
-            candidates.push(candidate);
+            if !candidates
+                .iter()
+                .any(|existing| existing.candidate == candidate.candidate)
+            {
+                candidates.push(candidate);
+            }
         }
 
         let mut setting_engine = SettingEngine::default();
@@ -222,6 +227,19 @@ impl WebRtcPeer {
         &mut self,
         _timeout: Duration,
     ) -> Result<Vec<RTCIceCandidateInit>> {
+        let public_candidate = self
+            .candidates
+            .iter()
+            .any(|candidate| candidate.candidate.contains(" typ srflx"));
+        crate::ui::status(&format!(
+            "Gathered {} network candidate(s){}.",
+            self.candidates.len(),
+            if public_candidate {
+                ", including a public address"
+            } else {
+                "; public-address discovery failed"
+            }
+        ));
         Ok(self.candidates.clone())
     }
 
@@ -369,6 +387,15 @@ async fn run_peer(
                     *context.ice_connection_state
                         .write()
                         .expect("ICE connection state poisoned") = state;
+                    match state {
+                        RTCIceConnectionState::Checking => {
+                            crate::ui::status("Checking direct network routes...");
+                        }
+                        RTCIceConnectionState::Failed => {
+                            log::error!("ICE failed: no direct network route reached the peer");
+                        }
+                        _ => {}
+                    }
                 }
                 RTCPeerConnectionEvent::OnDataChannel(channel_event) => match channel_event {
                     RTCDataChannelEvent::OnOpen(id) => {
@@ -546,8 +573,12 @@ fn discover_local_ip() -> IpAddr {
     socket.local_addr().map(|addr| addr.ip()).unwrap_or(fallback)
 }
 
-async fn gather_server_reflexive_candidate(socket: &UdpSocket) -> Option<(SocketAddr, String)> {
-    let local_is_ipv4 = socket.local_addr().ok()?.is_ipv4();
+async fn gather_server_reflexive_candidates(socket: &UdpSocket) -> Vec<(SocketAddr, String)> {
+    let Ok(local_addr) = socket.local_addr() else {
+        return Vec::new();
+    };
+    let local_is_ipv4 = local_addr.is_ipv4();
+    let mut candidates = Vec::new();
     for server in STUN_SERVERS {
         let Ok(Ok(resolved)) = tokio::time::timeout(
             Duration::from_millis(500),
@@ -566,7 +597,7 @@ async fn gather_server_reflexive_candidate(socket: &UdpSocket) -> Option<(Socket
 
         let mut transaction_id = [0u8; 12];
         if getrandom::getrandom(&mut transaction_id).is_err() {
-            return None;
+            return candidates;
         }
         let mut request = [0u8; 20];
         request[0..2].copy_from_slice(&0x0001u16.to_be_bytes());
@@ -591,11 +622,14 @@ async fn gather_server_reflexive_candidate(socket: &UdpSocket) -> Option<(Socket
         if let Some(mapped_addr) = parse_stun_binding_response(
             &response[..length],
             &transaction_id,
-        ) {
-            return Some((mapped_addr, (*server).to_owned()));
+        ) && !candidates
+                .iter()
+                .any(|(existing, _)| *existing == mapped_addr)
+        {
+            candidates.push((mapped_addr, (*server).to_owned()));
         }
     }
-    None
+    candidates
 }
 
 fn parse_stun_binding_response(packet: &[u8], transaction_id: &[u8; 12]) -> Option<SocketAddr> {
